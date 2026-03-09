@@ -1,0 +1,25 @@
+# 数据集 (Dataset)
+data/
+
+# 实验日志与模型结果 (Model Checkpoints, Logs and Experiments)
+logs/
+deepsdf/experiments/
+*.pth
+
+# 测试结果与推断生成文件 (Test Results)
+shape_completion_results.csv
+DepthCamera_*.json
+DepthCapture_*.png
+*.ply
+
+# Python 缓存等不需要追踪的文件
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+
+# IDE 与环境配置
+.vscode/
+.idea/
+.DS_Store
