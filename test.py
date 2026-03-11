@@ -24,6 +24,63 @@ from dataloaders.transforms import Pad, Rotate, RandomHorizontalFlip, RandomVert
 from dataloaders.cameralaser_w_masks import MaskedCameraLaserData
 from dataloaders.pointcloud_dataset import PointCloudDataset
 
+class CustomTestDataset(torch.utils.data.Dataset):
+    def __init__(self, data_source, pad_size):
+        self.data_source = data_source
+        self.pad_size = pad_size
+        self.files = []
+        # Support a single file or a directory
+        if os.path.isfile(data_source) and data_source.endswith('.ply'):
+            self.files.append(data_source)
+        elif os.path.isdir(data_source):
+            for root, _, files in os.walk(data_source):
+                for f in sorted(files):
+                    if f.endswith('.ply'):
+                        self.files.append(os.path.join(root, f))
+        else:
+            print(f"[Error] Custom test data_source {data_source} is invalid.")
+
+    def __len__(self):
+        return len(self.files)
+
+    def __getitem__(self, idx):
+        file_path = self.files[idx]
+        # Use filename without extension as fruit_id
+        fruit_id = os.path.splitext(os.path.basename(file_path))[0]
+        
+        pcd = o3d.io.read_point_cloud(file_path)
+        points = np.asarray(pcd.points)
+        num_points = points.shape[0]
+        
+        if num_points >= self.pad_size:
+            random_list = np.random.choice(num_points, size=self.pad_size, replace=False)
+            sampled_points = points[random_list, :]
+        else:
+            # 如果点数不够，则有放回地随机采样进行补全
+            if num_points == 0:
+                sampled_points = np.zeros((self.pad_size, 3))
+            else:
+                random_list = np.random.choice(num_points, size=self.pad_size, replace=True)
+                sampled_points = points[random_list, :]
+
+        item = {
+            'fruit_id': fruit_id,
+            'frame_id': fruit_id,
+            'target_pcd': torch.Tensor(sampled_points).float(), # Only for output tracking shape
+            'partial_pcd': torch.Tensor(sampled_points).float(),
+            'bbox': {
+                'min': torch.Tensor([-1.0, -1.0, -1.0]),
+                'max': torch.Tensor([1.0, 1.0, 1.0])
+            }
+        }
+        
+        # padding for other potential accesses
+        item['rgb'] = torch.zeros((3, self.pad_size, self.pad_size))
+        item['depth'] = torch.zeros((1, self.pad_size, self.pad_size))
+        item['mask'] = torch.zeros((1, self.pad_size, self.pad_size))
+
+        return item
+
 from networks.models import Encoder, EncoderBig, ERFNetEncoder, EncoderBigPooled, EncoderPooled, DoubleEncoder, PointCloudEncoder, PointCloudEncoderLarge, FoldNetEncoder
 import networks.utils as net_utils
 
@@ -46,7 +103,7 @@ import pandas as pd
 from sklearn.metrics import mean_squared_error
 
 
-def main_function(decoder, pretrain, cfg, latent_size):
+def main_function(decoder, pretrain, cfg, latent_size, test_data_dir=None):
     torch.manual_seed(133)
     np.random.seed(133)
     
@@ -108,31 +165,36 @@ def main_function(decoder, pretrain, cfg, latent_size):
     tfs = [Pad(size=param["input_size"])]
     tf = Compose(tfs)
 
-    if param['encoder'] in ['point_cloud', 'point_cloud_large', 'foldnet']:
-        cl_dataset = PointCloudDataset(
-            data_source=param["data_dir"],
-            pad_size=param["input_size"],
-            pretrain=pretrain,
-            use_partial=False,
-            supervised_3d=True
-        )
+    if test_data_dir is not None:
+        cl_dataset = CustomTestDataset(data_source=test_data_dir, pad_size=param["input_size"])
+        print(f"Testing on custom dataset directory: {test_data_dir}")
     else:
-        cl_dataset = MaskedCameraLaserData(data_source=param["data_dir"],
-                                            tf=tf, 
-                                            color_tf = None,
-                                            pretrain=pretrain,
-                                            pad_size=param["input_size"],
-                                            detection_input=param["detection_input"],
-                                            normalize_depth=param["normalize_depth"],
-                                            depth_min=param["depth_min"],
-                                            depth_max=param["depth_max"],
-                                            supervised_3d=True,
-                                            sdf_loss=param["3D_loss"],
-                                            grid_density=param["grid_density"],
-                                            split='test',
-                                            overfit=False,
-                                            species=param["species"]
-                                            )    
+        if param['encoder'] in ['point_cloud', 'point_cloud_large', 'foldnet']:
+            cl_dataset = PointCloudDataset(
+                data_source=param["data_dir"],
+                pad_size=param["input_size"],
+                pretrain=pretrain,
+                split='test',
+                use_partial=False,
+                supervised_3d=False
+            )
+        else:
+            cl_dataset = MaskedCameraLaserData(data_source=param["data_dir"],
+                                                tf=tf, 
+                                                color_tf = None,
+                                                pretrain=pretrain,
+                                                pad_size=param["input_size"],
+                                                detection_input=param["detection_input"],
+                                                normalize_depth=param["normalize_depth"],
+                                                depth_min=param["depth_min"],
+                                                depth_max=param["depth_max"],
+                                                supervised_3d=False,
+                                                sdf_loss=param["3D_loss"],
+                                                grid_density=param["grid_density"],
+                                                split='test',
+                                                overfit=False,
+                                                species=param["species"]
+                                                )
     dataset = DataLoader(cl_dataset, batch_size=1, shuffle=False)
 
     with torch.no_grad():
@@ -238,7 +300,7 @@ def main_function(decoder, pretrain, cfg, latent_size):
                 # 清除法线后保存，让可视化器自行计算正确的法线方向
                 mesh_save = o3d.geometry.TriangleMesh(mesh)
                 mesh_save.vertex_normals = o3d.utility.Vector3dVector()
-                mesh_save_path = os.path.join(os.path.dirname(pretrain), "meshes")
+                mesh_save_path = "/home/tianqi/corepp2/logs/strawberry/output"
                 if not os.path.exists(mesh_save_path):
                     os.makedirs(mesh_save_path)
                 o3d.io.write_triangle_mesh(os.path.join(mesh_save_path, item['frame_id'][0] + ".ply"), mesh_save)
@@ -266,11 +328,20 @@ def main_function(decoder, pretrain, cfg, latent_size):
             prec, rec, f1, _ = pr.compute_at_threshold(0.005, print_output=False)
 
             # Retrieve info dynamically if available, otherwise mock it.
-            # Removed pd read_csv for 3DPotatoTwinDemo explicitly
+            # 使用配置中的物理缩放因子将网络空间([-1, 1])体积对齐到真实毫米物理空间
+            norm_scale = param.get('normalization_scale', 1.0)
+            
+            # 若原单位为毫米 (mm), 则凸包测算出的虚拟空间体积 * (norm_scale ^ 3) = 物体真实 mm³ 体积
+            # 换算单位为 1 毫升 (ml) = 1 立方厘米 (cm³) = 1000 mm³
+            if volume > 0:
+                physical_volume_ml = (volume * (norm_scale ** 3)) / 1000.0
+            else:
+                physical_volume_ml = 0
+
             cur_data = {
                 'fruit_id': item['fruit_id'][0],
                 'frame_id': item['frame_id'][0],
-                'mesh_volume_ml': round(volume * 1e6, 1) if volume > 0 else 0,
+                'mesh_volume_ml': round(physical_volume_ml, 2),
                 'chamfer_distance': round(chamfer_distance, 6),
                 'precision': round(prec, 1),
                 'recall': round(rec, 1),
@@ -312,6 +383,14 @@ if __name__ == "__main__":
         help="The checkpoint weights to use. This should be a number indicated an epoch",
     )
 
+    arg_parser.add_argument(
+        "--test_data_dir",
+        "-t",
+        dest="test_data_dir",
+        default=None,
+        help="Optional: a specific custom directory containing point clouds (.ply) to test on instead of using the original split.json from training data.",
+    )
+    
     deep_sdf.add_common_args(arg_parser)
 
     args = arg_parser.parse_args()
@@ -343,4 +422,5 @@ if __name__ == "__main__":
     main_function(decoder=decoder,
                   pretrain=pretrain_path,
                   cfg=args.cfg,
-                  latent_size=latent_size)
+                  latent_size=latent_size,
+                  test_data_dir=args.test_data_dir)

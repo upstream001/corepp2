@@ -96,9 +96,13 @@ def convert_sdf_samples_to_ply(
 
     print(numpy_3d_sdf_tensor.min(), numpy_3d_sdf_tensor.max())
 
-    verts, faces, normals, values = skimage.measure.marching_cubes(
-        numpy_3d_sdf_tensor, level=0.0, spacing=[voxel_size] * 3
-    )
+    try:
+        verts, faces, normals, values = skimage.measure.marching_cubes(
+            numpy_3d_sdf_tensor, level=0.0, spacing=[voxel_size] * 3
+        )
+    except ValueError as e:
+        logging.error(f"Failed to extract mesh with marching cubes: {e}")
+        return
 
     # transform from voxel coordinates to camera coordinates
     # note x and y are flipped in the output of marching_cubes

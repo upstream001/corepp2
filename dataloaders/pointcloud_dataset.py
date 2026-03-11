@@ -19,6 +19,7 @@ class PointCloudDataset(torch.utils.data.Dataset):
         """
         self.data_source = data_source
         self.pad_size = pad_size
+        self.split = split
         self.use_partial = use_partial
         self.supervised_3d = supervised_3d
         
@@ -43,15 +44,33 @@ class PointCloudDataset(torch.utils.data.Dataset):
         return latent_dictionary
 
     def get_instance_filenames(self):
+        import json
         subfolder = 'partial' if self.use_partial else 'complete'
         pcd_dir = os.path.join(self.data_source, subfolder)
         
+        allowed_keys = None
+        if self.split is not None:
+            split_file = os.path.join(self.data_source, 'split.json')
+            if os.path.exists(split_file):
+                with open(split_file, 'r') as f:
+                    splits = json.load(f)
+                    if self.split in splits:
+                        allowed_keys = set(splits[self.split])
+                    else:
+                        print(f"[Warning] Split '{self.split}' not found in {split_file}")
+            else:
+                print(f"[Warning] Split file {split_file} not found, using all files.")
+
         files = []
         if os.path.exists(pcd_dir):
             for fname in sorted(os.listdir(pcd_dir)):
                 if not fname.endswith('.ply'): 
                     continue
                 key = fname[:-4]
+                
+                # 如果启用了 split，过滤掉不属于该 split 的文件
+                if allowed_keys is not None and key not in allowed_keys:
+                    continue
                 
                 # 如果开启了 supervised_3d，必须确保该点云有对应的 latent code 存在
                 if self.supervised_3d:

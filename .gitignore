@@ -3,7 +3,13 @@ data/
 
 # 实验日志与模型结果 (Model Checkpoints, Logs and Experiments)
 logs/
-deepsdf/experiments/
+deepsdf/experiments/*/ModelParameters/
+deepsdf/experiments/*/OptimizerParameters/
+deepsdf/experiments/*/LatentCodes/
+deepsdf/experiments/*/Reconstructions/
+deepsdf/experiments/*/Evaluation/
+deepsdf/experiments/*/TrainingMeshes/
+deepsdf/experiments/*/NormalizationParameters/
 *.pth
 
 # 测试结果与推断生成文件 (Test Results)
@@ -11,6 +17,7 @@ shape_completion_results.csv
 DepthCamera_*.json
 DepthCapture_*.png
 *.ply
+*.npz
 
 # Python 缓存等不需要追踪的文件
 __pycache__/

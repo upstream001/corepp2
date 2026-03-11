@@ -23,11 +23,15 @@ data/strawberry/
     └── ...
 ```
 
-**2. （可选）数据增强**
-如果仅有的草莓点云样本数量偏少，推荐运行数据增强提取更多的位姿和形状形态：
+**2. （强烈推荐）数据几何增强 (Data Augmentation)**
+如果你发现草莓点云的分布尺度和大小趋于一致，网络难以为未见过的大小推断体积（缺乏尺度泛化能力）。强烈推荐运行我专门为你编写的点云增强独立脚本 `augment_strawberry.py`，它会只打乱草莓的大小比例、扭转朝向和做裁切形变（但保留正确的朝外水密法线）：
 ```bash
-python data_preparation/augment.py --src ./data/strawberry
+python data_preparation/augment_strawberry.py \
+    --src /home/tianqi/corepp2/data/20260301_dataset \
+    --dst /home/tianqi/corepp2/data/20260301_dataset_aug \
+    --json_config data_preparation/augment.json
 ```
+*(注意：扩增完成后，后续所有的第3步、第4步都要换成这个 `_aug` 的新目录，对应的实验目录也要一并建一个新的去重新跑端到端训练！)*
 
 **3. 生成 SDF (符号距离场) 采样训练数据**
 运行以下专门针对单体配准点云结构编写的脚本，会在数据集内按 DeepSDF 所需层级生成 `samples.npz`，这是 DeepSDF 网络训练必须的三维外/内表面距离标签。
@@ -129,10 +133,22 @@ python train.py \
 python test.py \
     --cfg ./configs/strawberry.json \
     --experiment ./deepsdf/experiments/20260301_dataset \
-    --checkpoint_decoder 500
+    --checkpoint_decoder 500 
 ```
 
-`test.py` 内部处理逻辑已经包括了重建出的网格对象的读取，并通过 `mesh.get_volume()` 原生实现了体积大小计算。
+在默认状态下，测试脚本会自动读取 `data/dataset_name/split.json` 里标注的 `test` 划分集数据进行验证评估。
+
+**在野推断（In-the-wild Inference/自定义测试文件夹）：**
+如果你有新采集的散装点云数据，或者刚才利用脚本（诸如投影视角采样渲染脚本带来的残缺点云）生成了一批存放在另一个游离目录的外源 `.ply` 测试包。这时候你只需要挂上 `--test_data_dir` 参数就可以直接对其执行测试推理：
+```bash
+python test.py \
+    --cfg ./configs/strawberry.json \
+    --experiment ./deepsdf/experiments/20260301_dataset \
+    --checkpoint_decoder 500 \
+    --test_data_dir /home/tianqi/corepp2/data/render_output_perspective/size38_16384_normalized
+```
+
+`test.py` 内部处理逻辑已经包括了重建出的网格对象的读取，并通过 `mesh.get_volume()` 原生实现了真实空间体积大小计算。
 推理结果会自动作为行数据追加到当前主目录下的运行报告中：
 ✅ **报告位置：** `./shape_completion_results.csv`
 在这个输出表中，主要关注 `mesh_volume_ml` 列，它是基于计算出几何物体的体积（Volume）进而估算出的真实草莓大小。

@@ -25,7 +25,7 @@ from networks.models import Encoder, EncoderBig, ERFNetEncoder, EncoderBigPooled
 import networks.utils as net_utils
 
 from loss import KLDivLoss, SuperLoss, SDFLoss, RegLatentLoss, AttRepLoss
-from utils import sdf2mesh_cuda, save_model, tensor_dict_2_float_dict
+from utils_file import sdf2mesh_cuda, save_model, tensor_dict_2_float_dict
 
 DEBUG = True
 

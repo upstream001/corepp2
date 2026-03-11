@@ -148,7 +148,22 @@ def sdf2mesh_cuda(pred_sdf, grid_points, t=0):
     keep_idx = torch.lt(pred_sdf, t)
     keep_points = grid_points[torch.squeeze(keep_idx)]
 
-    o3d_t = o3c.Tensor.from_dlpack(torch.utils.dlpack.to_dlpack(keep_points))
+    # [新增滤波步骤] 先将 Tensor 转换为 Open3D 传统 PointCloud 进行滤波
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(keep_points.cpu().numpy())
+    
+    # 1. 统计离群点移除 (Statistical Outlier Removal)：去除由于网络不完美产生的稀疏游离点
+    pcd, ind = pcd.remove_statistical_outlier(nb_neighbors=50, std_ratio=1.0)
+    
+    # 2. DBSCAN 密度聚类：将空间中孤立的噪点块分离，只保留含有最多点的主体簇（即草莓本身）
+    labels = np.array(pcd.cluster_dbscan(eps=0.05, min_points=10, print_progress=False))
+    if len(labels) > 0 and labels.max() >= 0:
+        # 寻找包含点数最多的类别（剔除 -1 的噪声类）
+        largest_cluster_idx = np.bincount(labels[labels >= 0]).argmax()
+        pcd = pcd.select_by_index(np.where(labels == largest_cluster_idx)[0])
+
+    # 将过滤干净的点云重新转回 GPU Tensor，用于后续求凸包
+    o3d_t = o3c.Tensor.from_legacy(pcd)
     pcd_gpu = o3d.t.geometry.PointCloud(o3d_t)
 
     hull_gpu = pcd_gpu.compute_convex_hull()

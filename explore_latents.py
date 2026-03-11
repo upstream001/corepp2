@@ -30,7 +30,7 @@ import networks.utils as net_utils
 
 import open3d as o3d
 import numpy as np
-from utils import sdf2mesh_cuda
+from utils_file import sdf2mesh_cuda
 
 import time
 import json
