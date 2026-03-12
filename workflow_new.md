@@ -64,34 +64,18 @@ python data_preparation/make_strawberry_splits.py --data_dir /home/tianqi/corepp
 
 **2. 启动训练**
 ```bash
-python train_deep_sdf.py --experiment ./deepsdf/experiments/20260301_dataset
+python train_deep_sdf.py --experiment ./deepsdf/experiments/20260301_dataset_aug
 ```
 根据表现选取一个最优的 Checkpoint（例如第 1000 个 Epoch，即 `1000.pth`）。
 
 ---
 
-## 第三阶段：生成训练集的真实的 Latent Codes (Ground Truth)
-
-为了训练 Encoder（使它的输出有个目标靶子），需要为**训练集**的每个数据生成标准答案（真实的 Latent code）。我们使用固定的最优 DeepSDF 权重去优化并取得这些代码。
-
-> **`--partial` 参数说明：**
-> - **加 `--partial`**：从完整点云模拟残缺观测（通过 `hidden_point_removal` 随机视角遮挡），用残缺数据优化 latent code。适用于部署时 Encoder 接收残缺点云的场景。
-> - **不加 `--partial`**：直接使用完整 SDF 数据优化 latent code。重建质量更好，适用于 Encoder 接收完整点云的场景。
-
-```bash
-# 残缺点云场景（模拟部分观测）
-python reconstruct_deep_sdf.py --experiment ./deepsdf/experiments/20260301_dataset --data ./data/20260301_dataset --checkpoint 500 --split deepsdf/experiments/splits/20260301_dataset_train.json --partial
-
-# 完整点云场景
-python reconstruct_deep_sdf.py --experiment ./deepsdf/experiments/20260301_dataset --data ./data/20260301_dataset --checkpoint 500 --split deepsdf/experiments/splits/20260301_dataset_train.json
-```
-结果会保存在 `deepsdf/experiments/20260301_dataset/Reconstructions/500/Codes/partial/` 或 `complete/` 路径下，这就是下一阶段 Encoder 需要学习去拟合的“真值”。
-
----
-
-## 第四阶段：训练点云编码器 (Point Cloud Encoder)
+## 第三阶段：训练点云编码器 (Point Cloud Encoder)
 
 这部分就是你关注的编码器训练。因为没有前置的 RGB 图像，我们需要配置一个专用于处理点云特征的网络（比如 Point Cloud Encoder 或 FoldNet）。
+
+> **关于 Latent Codes 真值（Ground Truth）的重要改动：**
+> 在原版的测试时优化流程中，需要在训练完了 DeepSDF 之后强行再跑一趟 `reconstruct_deep_sdf.py` 取出重构真值供此时的 Encoder 学习，效率偏低且带来不可靠的噪音。现在 `test.py` 和 Dataset 已**完全重构**，网络会自动从你第二阶段跑完的 `deepsdf/experiments/.../LatentCodes` 中提取生成合并而成的宏观隐式表面权重，**无需手动再跑重构提取！** 
 
 **1. 编写配置文件**
 在 `./configs/` 下新建一份 `strawberry.json`，核心设置一定要将 `"encoder"` 指定为点云网络：
@@ -107,7 +91,7 @@ python reconstruct_deep_sdf.py --experiment ./deepsdf/experiments/20260301_datas
     "batch_size" : 12,
     "epoch" : 100,
     "supervised_3d" : true, //开启3D监督
-    "grid_density": 20,
+    "grid_density": 20
     //与 pce.json 类似保持不变
 }
 ```
@@ -119,11 +103,11 @@ python train.py \
     --experiment ./deepsdf/experiments/20260301_dataset \
     --checkpoint_decoder 500
 ```
-在这里点云编码器（Encoder）会接收部分点云，预测出一组 Latent Code，并与 第三阶段得到的真实 Latent Code 比较误差并更新自身权重。
+在这里点云编码器（Encoder）会接收点云，预测出一组 Latent Code，并直接与 DeepSDF 训练阶段生成的真实 Latent Code 比较误差来更新自身权重。
 
 ---
 
-## 第五阶段：端到端推理与草莓大小(体积)估计
+## 第四阶段：端到端推理与草莓大小(体积)估计
 
 现在编码器（Encoder）和解码器（Decoder）均已训练完毕。对于**完全未见过的测试集草莓点云**，我们可以实现直接前向打通：点云 -> Encoder提取编码 -> Decoder重建Mesh网格 -> 计算出真实体积。
 

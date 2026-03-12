@@ -114,8 +114,9 @@ if __name__ == "__main__":
     if not input_files:
         print("未指定文件，使用默认示例文件...")
         input_files = [
-            "/home/tianqi/corepp2/data/render_output_perspective/size38_16384_normalized/perp_000.ply",
-            "/home/tianqi/corepp2/data/test_ply_resample/size38_16384_normalized.ply"
+            "/home/tianqi/corepp2/data/20260301_dataset_aug/complete/00000_aug_00.ply",
+            "",
+            "/home/tianqi/corepp2/logs/strawberry/output/00252_aug_00.ply"
         ]
     
     visualize(input_files, args.offset)

@@ -23,9 +23,9 @@ from dataloaders.transforms import Pad, Rotate, RandomHorizontalFlip, RandomVert
 
 from networks.models import Encoder, EncoderBig, ERFNetEncoder, EncoderBigPooled, EncoderPooled, DoubleEncoder, PointCloudEncoder, PointCloudEncoderLarge, FoldNetEncoder
 import networks.utils as net_utils
-
+from networks.pointnext import PointNeXtEncoder, build_pointnext_encoder
 from loss import KLDivLoss, SuperLoss, SDFLoss, RegLatentLoss, AttRepLoss
-from utils_file import sdf2mesh_cuda, save_model, tensor_dict_2_float_dict
+from utils import sdf2mesh_cuda, save_model, tensor_dict_2_float_dict
 
 DEBUG = True
 
@@ -80,6 +80,8 @@ def main_function(decoder, pretrain, cfg, latent_size, trunc_val, overfit, updat
         encoder = PointCloudEncoderLarge(in_channels=3, out_channels=latent_size).to(device)
     elif param['encoder'] == 'foldnet':
         encoder = FoldNetEncoder(in_channels=3, out_channels=latent_size).to(device)
+    elif param['encoder'] == 'pointnext':
+        encoder = build_pointnext_encoder(out_channels=latent_size, cfg=param).to(device)
     else:
         encoder = Encoder(in_channels=4, out_channels=latent_size, size=param["input_size"]).to(device)
 
@@ -97,7 +99,7 @@ def main_function(decoder, pretrain, cfg, latent_size, trunc_val, overfit, updat
     default_tfs = [Pad(size=param["input_size"]), geo_tfs]
     default_tf = v2.Compose(default_tfs)
 
-    if param['encoder'] in ['point_cloud', 'point_cloud_large', 'foldnet']:
+    if param['encoder'] in ['point_cloud', 'point_cloud_large', 'foldnet', 'pointnext']:
         cl_dataset = PointCloudDataset(
             data_source=param["data_dir"],
             pad_size=param["input_size"],
@@ -149,7 +151,7 @@ def main_function(decoder, pretrain, cfg, latent_size, trunc_val, overfit, updat
             loss = 0
 
             # unpacking inputs
-            if param['encoder'] != 'point_cloud' and param['encoder'] != 'point_cloud_large' and param['encoder'] != 'foldnet':
+            if param['encoder'] not in ['point_cloud', 'point_cloud_large', 'foldnet', 'pointnext']:
                 encoder_input = torch.cat((item['rgb'], item['depth']), 1).to(device)
             else:
                 encoder_input = item['partial_pcd'].permute(0, 2, 1).to(device) ## be aware: the current partial pcd is not registered to the target pcd!
@@ -199,35 +201,35 @@ def main_function(decoder, pretrain, cfg, latent_size, trunc_val, overfit, updat
                 writer.add_scalar('Loss/Train/RegLoss',loss_reg, n_iter)
                 logging_string += ' -- loss reg: {}'.format(loss_reg.item())
 
-            # creating a Grid3D for each latent in the batch
-            current_batch_size = encoder_input.shape[0]
-
-            try:
-                box = tensor_dict_2_float_dict(item['bbox'])
-            except:
-                box = {
-                    'xmin': -1.0,
-                    'xmax': 1.0,
-                    'ymin': -1.0,
-                    'ymax': 1.0,
-                    'zmin': -1.0,
-                    'zmax': 1.0
-                }
-
-            grid_batch = []
-            for _ in range(current_batch_size):
-                grid_batch.append(Grid3D(grid_density, device, precision, bbox=box))
-
-            deepsdf_input = torch.zeros((current_batch_size, grid_density**3, latent_size+3))
-            for batch_idx, (latent, grid) in enumerate(zip(latent_batch, grid_batch)):
-                deepsdf_input[batch_idx] = torch.cat([latent.expand(grid.points.size(0), -1), grid.points], dim=1)
-
-            deepsdf_input = deepsdf_input.to(device, latent.dtype)
-
-            # decoding
-            pred_sdf = decoder(deepsdf_input)
-
             if param["3D_loss"]:
+                # creating a Grid3D for each latent in the batch
+                current_batch_size = encoder_input.shape[0]
+
+                try:
+                    box = tensor_dict_2_float_dict(item['bbox'])
+                except:
+                    box = {
+                        'xmin': -1.0,
+                        'xmax': 1.0,
+                        'ymin': -1.0,
+                        'ymax': 1.0,
+                        'zmin': -1.0,
+                        'zmax': 1.0
+                    }
+
+                grid_batch = []
+                for _ in range(current_batch_size):
+                    grid_batch.append(Grid3D(grid_density, device, precision, bbox=box))
+
+                deepsdf_input = torch.zeros((current_batch_size, grid_density**3, latent_size+3))
+                for batch_idx, (latent, grid) in enumerate(zip(latent_batch, grid_batch)):
+                    deepsdf_input[batch_idx] = torch.cat([latent.expand(grid.points.size(0), -1), grid.points], dim=1)
+
+                deepsdf_input = deepsdf_input.to(device, latent.dtype)
+
+                # decoding
+                pred_sdf = decoder(deepsdf_input)
+
                 loss_sdf = SDFLoss(pred_sdf, item['target_sdf'].to(device), item['target_sdf_weights'].to(device), sdf_trunc=cl_dataset.sdf_trunc, points=grid_batch)
                 loss += param['lambda_sdf']*loss_sdf
 
@@ -253,7 +255,7 @@ def main_function(decoder, pretrain, cfg, latent_size, trunc_val, overfit, updat
                 val_tfs = [Pad(size=param["input_size"])]
                 val_tf = v2.Compose(val_tfs)
 
-                if param['encoder'] in ['point_cloud', 'point_cloud_large', 'foldnet']:
+                if param['encoder'] in ['point_cloud', 'point_cloud_large', 'foldnet', 'pointnext']:
                     val_cl_dataset = PointCloudDataset(
                         data_source=param["data_dir"],
                         pad_size=param["input_size"],
@@ -285,7 +287,7 @@ def main_function(decoder, pretrain, cfg, latent_size, trunc_val, overfit, updat
                 print('\nvalidation...')
                 for _, item in enumerate(tqdm(iter(val_dataset))):
                     try:
-                        if param['encoder'] != 'point_cloud' and param['encoder'] != 'point_cloud_large' and param['encoder'] != 'foldnet':
+                        if param['encoder'] not in ['point_cloud', 'point_cloud_large', 'foldnet', 'pointnext']:
                             encoder_input = torch.cat((item['rgb'], item['depth']), 1).to(device)
                         else:
                             encoder_input = item['partial_pcd'].permute(0, 2, 1).to(device)
@@ -384,16 +386,20 @@ if __name__ == "__main__":
     decoder.load_state_dict(model_state)
     decoder = net_utils.set_require_grad(decoder, True)
 
-    # 根据实际跑重建时有无 --partial，自动选择加载 latent codes 的路径
+    # 优先加载 DeepSDF 各 Epoch 训练时同步生成的全局 Latent 矩阵真值 (跳过单独解构环节)
+    pretrain_matrix = os.path.join(args.experiment_directory, ws.latent_codes_subdir, args.checkpoint + ".pth")
+    # 向下兼容使用 reconstruct 脚本抽取的独立部分结果
     pretrain_path_partial = os.path.join(args.experiment_directory, 'Reconstructions', args.checkpoint, 'Codes', 'partial')
     pretrain_path_complete = os.path.join(args.experiment_directory, 'Reconstructions', args.checkpoint, 'Codes', 'complete')
     
-    if os.path.exists(pretrain_path_partial):
+    if os.path.exists(pretrain_matrix):
+        pretrain_path = pretrain_matrix
+    elif os.path.exists(pretrain_path_partial):
         pretrain_path = pretrain_path_partial
     elif os.path.exists(pretrain_path_complete):
         pretrain_path = pretrain_path_complete
     else:
-        pretrain_path = pretrain_path_complete # fallback
+        pretrain_path = pretrain_matrix # fallback to matrix
 
     main_function(decoder=decoder,
                   pretrain=pretrain_path,

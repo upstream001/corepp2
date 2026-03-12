@@ -25,10 +25,12 @@ from dataloaders.cameralaser_w_masks import MaskedCameraLaserData
 from dataloaders.pointcloud_dataset import PointCloudDataset
 
 class CustomTestDataset(torch.utils.data.Dataset):
-    def __init__(self, data_source, pad_size):
+    def __init__(self, data_source, pad_size, norm_scale=45.54):
         self.data_source = data_source
         self.pad_size = pad_size
+        self.norm_scale = norm_scale
         self.files = []
+        
         # Support a single file or a directory
         if os.path.isfile(data_source) and data_source.endswith('.ply'):
             self.files.append(data_source)
@@ -63,11 +65,21 @@ class CustomTestDataset(torch.utils.data.Dataset):
                 random_list = np.random.choice(num_points, size=self.pad_size, replace=True)
                 sampled_points = points[random_list, :]
 
+        # --- Global Physical Normalization ---
+        # 对于自然数据，直接应用统一测绘好的全局缩放常数(norm_scale)。
+        # 不使用局部点云自身包围盒，避免抹去不同草莓的大小尺度差异
+        scale = self.norm_scale
+        center = np.zeros(3)
+
+        sampled_points = sampled_points / scale
+        
         item = {
             'fruit_id': fruit_id,
             'frame_id': fruit_id,
             'target_pcd': torch.Tensor(sampled_points).float(), # Only for output tracking shape
             'partial_pcd': torch.Tensor(sampled_points).float(),
+            'center': torch.Tensor(center).float(),
+            'scale': torch.tensor(scale).float(),
             'bbox': {
                 'min': torch.Tensor([-1.0, -1.0, -1.0]),
                 'max': torch.Tensor([1.0, 1.0, 1.0])
@@ -82,6 +94,7 @@ class CustomTestDataset(torch.utils.data.Dataset):
         return item
 
 from networks.models import Encoder, EncoderBig, ERFNetEncoder, EncoderBigPooled, EncoderPooled, DoubleEncoder, PointCloudEncoder, PointCloudEncoderLarge, FoldNetEncoder
+from networks.pointnext import PointNeXtEncoder, build_pointnext_encoder
 import networks.utils as net_utils
 
 import open3d as o3d
@@ -147,14 +160,19 @@ def main_function(decoder, pretrain, cfg, latent_size, test_data_dir=None):
         encoder = PointCloudEncoderLarge(in_channels=3, out_channels=latent_size).to(device)
     elif param['encoder'] == 'foldnet':
         encoder = FoldNetEncoder(in_channels=3, out_channels=latent_size).to(device)
+    elif param['encoder'] == 'pointnext':
+        encoder = build_pointnext_encoder(out_channels=latent_size, cfg=param).to(device)
     else:
         encoder = Encoder(in_channels=4, out_channels=latent_size, size=param["input_size"]).to(device)
 
     ckpt = os.path.join(param['checkpoint_dir'], param['checkpoint_file'])
-    # import ipdb;ipdb.set_trace()
-    encoder.load_state_dict(torch.load(ckpt)['encoder_state_dict'])
-    decoder.load_state_dict(torch.load(ckpt)['decoder_state_dict'])
-
+    ckpt_data = torch.load(ckpt)
+    if 'encoder_state_dict' in ckpt_data:
+        encoder.load_state_dict(ckpt_data['encoder_state_dict'])
+    else:
+        encoder.load_state_dict(ckpt_data)
+    if 'decoder_state_dict' in ckpt_data:
+        decoder.load_state_dict(ckpt_data['decoder_state_dict'])
     ##############################
     #  TESTING LOOP STARTS HERE  #
     ##############################
@@ -166,10 +184,11 @@ def main_function(decoder, pretrain, cfg, latent_size, test_data_dir=None):
     tf = Compose(tfs)
 
     if test_data_dir is not None:
-        cl_dataset = CustomTestDataset(data_source=test_data_dir, pad_size=param["input_size"])
+        norm_scale = param.get("normalization_scale", 45.54)
+        cl_dataset = CustomTestDataset(data_source=test_data_dir, pad_size=param["input_size"], norm_scale=norm_scale)
         print(f"Testing on custom dataset directory: {test_data_dir}")
     else:
-        if param['encoder'] in ['point_cloud', 'point_cloud_large', 'foldnet']:
+        if param['encoder'] in ['point_cloud', 'point_cloud_large', 'foldnet', 'pointnext']:
             cl_dataset = PointCloudDataset(
                 data_source=param["data_dir"],
                 pad_size=param["input_size"],
@@ -220,7 +239,7 @@ def main_function(decoder, pretrain, cfg, latent_size, test_data_dir=None):
             start = time.time()
 
             # unpacking inputs
-            if param['encoder'] != 'point_cloud' and param['encoder'] != 'point_cloud_large' and param['encoder'] != 'foldnet':
+            if param['encoder'] not in ['point_cloud', 'point_cloud_large', 'foldnet', 'pointnext']:
                 encoder_input = torch.cat((item['rgb'], item['depth']), 1).to(device)
             else: 
                 encoder_input = item['partial_pcd'].permute(0, 2, 1).to(device) ## be aware: the current partial pcd is not registered to the target pcd!
@@ -235,75 +254,35 @@ def main_function(decoder, pretrain, cfg, latent_size, test_data_dir=None):
                     os.makedirs(save_path)
             torch.save(latent_save, os.path.join(save_path, item['frame_id'][0] + ".pth"))
 
-            grid_3d = Grid3D(grid_density, device, precision, bbox=box)
-            deepsdf_input = torch.cat([latent.expand(grid_3d.points.size(0), -1),
-                                        grid_3d.points], dim=1).to(latent.device, latent.dtype)
-            
-            # 采用分块推理避免显存溢出 (OOM)
-            # grid_density=128 会产生约 200 万个点，一次性送入 Decoder 需要近 8GB 显存
-            chunk_size = 65536  # 每次处理的特征数量 (约 256^2)
-            pred_sdf_list = []
-            for start_idx in range(0, deepsdf_input.size(0), chunk_size):
-                end_idx = min(start_idx + chunk_size, deepsdf_input.size(0))
-                chunk_input = deepsdf_input[start_idx:end_idx]
-                with torch.no_grad():
-                    chunk_pred = decoder(chunk_input)
-                pred_sdf_list.append(chunk_pred)
-            pred_sdf = torch.cat(pred_sdf_list, dim=0)
-
             try:
-                # 使用 Marching Cubes 替代凸包，获得高质量等值面
-                N = grid_density
-                sdf_values = pred_sdf.detach().cpu().numpy().reshape(N, N, N)
-                
-                # bbox 范围
-                x_min, x_max = box.get('xmin', -1.0), box.get('xmax', 1.0)
-                y_min, y_max = box.get('ymin', -1.0), box.get('ymax', 1.0)
-                z_min, z_max = box.get('zmin', -1.0), box.get('zmax', 1.0)
-                spacing = ((x_max - x_min) / (N - 1),
-                           (y_max - y_min) / (N - 1),
-                           (z_max - z_min) / (N - 1))
-                
-                verts, faces, normals_mc, _ = skimage.measure.marching_cubes(
-                    sdf_values, level=0.0, spacing=spacing
-                )
-                # 将顶点坐标从网格空间转到实际空间
-                verts[:, 0] += x_min
-                verts[:, 1] += y_min
-                verts[:, 2] += z_min
-                
-                mesh = o3d.geometry.TriangleMesh()
-                mesh.vertices = o3d.utility.Vector3dVector(verts)
-                mesh.triangles = o3d.utility.Vector3iVector(faces)
-                mesh.compute_vertex_normals()
-                
-                # 连通域过滤：只保留最大的连通组件（草莓本体），移除远场噪声碎片
-                triangle_clusters, cluster_n_triangles, _ = mesh.cluster_connected_triangles()
-                triangle_clusters = np.asarray(triangle_clusters)
-                cluster_n_triangles = np.asarray(cluster_n_triangles)
-                if len(cluster_n_triangles) > 0:
-                    largest_cluster = cluster_n_triangles.argmax()
-                    triangles_to_remove = triangle_clusters != largest_cluster
-                    mesh.remove_triangles_by_mask(triangles_to_remove)
-                    mesh.remove_unreferenced_vertices()
-                
-                # 清理退化几何元素
-                mesh.remove_degenerate_triangles()
-                mesh.remove_duplicated_triangles()
-                mesh.remove_duplicated_vertices()
-                mesh.remove_non_manifold_edges()
-                
-                # Taubin 平滑：比 Laplacian 更好，不会缩小网格体积
-                mesh = mesh.filter_smooth_taubin(number_of_iterations=30)
-                
-                # Save reconstructed mesh
-                # 清除法线后保存，让可视化器自行计算正确的法线方向
-                mesh_save = o3d.geometry.TriangleMesh(mesh)
-                mesh_save.vertex_normals = o3d.utility.Vector3dVector()
+                import deepsdf.deep_sdf.mesh
                 mesh_save_path = "/home/tianqi/corepp2/logs/strawberry/output"
                 if not os.path.exists(mesh_save_path):
                     os.makedirs(mesh_save_path)
-                o3d.io.write_triangle_mesh(os.path.join(mesh_save_path, item['frame_id'][0] + ".ply"), mesh_save)
+                    
+                mesh_filename = os.path.join(mesh_save_path, item['frame_id'][0]) # no .ply ext
+                
+                scale_val = 1.0
+                center_val = np.array([0., 0., 0.])
+                if 'scale' in item and 'center' in item:
+                    scale_val = item['scale'].item()
+                    center_val = item['center'][0].cpu().numpy()
+                
+                deepsdf.deep_sdf.mesh.create_mesh(
+                    decoder, 
+                    latent, 
+                    mesh_filename, 
+                    start=time.time(), 
+                    N=grid_density, 
+                    max_batch=int(2 ** 18),
+                    offset=-center_val,
+                    scale=1.0 / scale_val
+                )
+                
+                # Load the generated mesh back using open3d for the subsequent metric computations
+                mesh_ply_file = mesh_filename + ".ply"
+                mesh = o3d.io.read_triangle_mesh(mesh_ply_file)
+                mesh.compute_vertex_normals()
 
                 # 体积计算：使用 scipy ConvexHull（100% 可靠，无水密性要求）
                 try:
@@ -327,14 +306,10 @@ def main_function(decoder, pretrain, cfg, latent_size, test_data_dir=None):
             pr.update(gt, mesh)
             prec, rec, f1, _ = pr.compute_at_threshold(0.005, print_output=False)
 
-            # Retrieve info dynamically if available, otherwise mock it.
-            # 使用配置中的物理缩放因子将网络空间([-1, 1])体积对齐到真实毫米物理空间
-            norm_scale = param.get('normalization_scale', 1.0)
-            
-            # 若原单位为毫米 (mm), 则凸包测算出的虚拟空间体积 * (norm_scale ^ 3) = 物体真实 mm³ 体积
-            # 换算单位为 1 毫升 (ml) = 1 立方厘米 (cm³) = 1000 mm³
+            # 因为此前在 create_mesh 时已经传入了动态算出的 offset 和 scale，使得输出的 .ply 文件以及 read_triangle_mesh 生成的 mesh 坐标刚好被复原为了等比例真实的相机系物理大小！
+            # 凸包求得的无量纲体积即是真实的立体体积 (mm³) -> /1000 = 真实物理体积
             if volume > 0:
-                physical_volume_ml = (volume * (norm_scale ** 3)) / 1000.0
+                physical_volume_ml = volume / 1000.0
             else:
                 physical_volume_ml = 0
 

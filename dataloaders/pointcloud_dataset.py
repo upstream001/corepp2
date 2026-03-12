@@ -35,7 +35,48 @@ class PointCloudDataset(torch.utils.data.Dataset):
         if not os.path.exists(path):
             print(f"[Warning] Latent codes path {path} does not exist.")
             return latent_dictionary
-            
+
+        # Support Unified Latent Matrix (.pth file instead of directory)
+        if os.path.isfile(path) and path.endswith('.pth'):
+            try:
+                latents_file = torch.load(path)
+                if 'latent_codes' in latents_file and 'weight' in latents_file['latent_codes']:
+                    latents_matrix = latents_file['latent_codes']['weight']
+                    import json
+                    # 尝试从 DeepSDF 对应的划分表中寻找名称以对齐索引 (例如 deepsdf/experiments/splits/xxx_train.json)
+                    base_exp_dir = os.path.dirname(os.path.dirname(os.path.dirname(path))) # 回退至 experiments 级别
+                    ds_name = os.path.basename(os.path.dirname(os.path.dirname(path))) # 例如 20260301_dataset_aug
+                    split_type = self.split if self.split else 'train'
+                    split_file = os.path.join(base_exp_dir, 'splits', f"{ds_name}_{split_type}.json")
+                    
+                    if os.path.exists(split_file):
+                        with open(split_file, 'r') as f:
+                            splits_data = json.load(f)
+                            
+                        # 解析 DeepSDF 预设的结构 {"DatasetName": {"ClassName": [list of instances]}}
+                        instance_names = []
+                        if ds_name in splits_data:
+                            class_dict = splits_data[ds_name]
+                            if len(class_dict) == 1:
+                                class_key = list(class_dict.keys())[0]
+                                instance_names = class_dict[class_key]
+                            elif 'fruit' in class_dict:
+                                instance_names = class_dict['fruit']
+                                
+                        if len(instance_names) == latents_matrix.shape[0]:
+                            for i, inst in enumerate(instance_names):
+                                latent_dictionary[inst] = latents_matrix[i].squeeze()
+                            print(f"[Info] Successfully mapped {len(instance_names)} latent codes from matrix {path} via {split_type} split.")
+                        else:
+                            print(f"[Warning] Matrix rows ({latents_matrix.shape[0]}) mismatch DeepSDF split size ({len(instance_names)}).")
+                    else:
+                        print(f"[Warning] Cannot find DeepSDF split definition at {split_file} to map the latent matrix.")
+                return latent_dictionary
+            except Exception as e:
+                print(f"[Error] Failed to load unified latent file {path}: {e}")
+                return latent_dictionary
+
+        # Support Directory with individual .pth files (Legacy reconstruct optimization)
         for fname in os.listdir(path):
             if fname.endswith('.pth'):
                 latent = torch.load(os.path.join(path, fname))
