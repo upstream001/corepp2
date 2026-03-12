@@ -174,26 +174,25 @@ def perspective_render_batch(pcl_batch, rotmat_az_batch, rotmat_el_batch,
             pass
             
     # 3. 判定可见性
-    # 恢复形状
-    z_buffer = z_buffer.view(batch_size, resolution, resolution)
+    import torch.nn.functional as F
     
-    # 对于每个点 (N)，查询其投影位置的 z_buffer 值
-    # 我们知道每个点的 (b, u, v)
+    # 对 Z-Buffer 进行形态学膨胀（MaxPool），把前面点的深度“晕染”扩散到周围像素
+    # 这样由于散点稀疏带来的投影缝隙就会被前面的遮挡深度填补，彻底干掉背面透视过来的散落点
+    z_buffer = z_buffer.view(batch_size, 1, resolution, resolution)
+    z_buffer = F.max_pool2d(z_buffer, kernel_size=5, stride=1, padding=2)
+    z_buffer = F.max_pool2d(z_buffer, kernel_size=5, stride=1, padding=2)
     
-    # 取样 Z-Buffer 值: 
-    # gathered_z = z_buffer[b, u, v]
-    # 使用 gather
+    z_buffer_flat = z_buffer.view(-1)
+    
+    # 对于每个点 (N)，查询其投影位置上膨胀后的最新 z_buffer 值
     gathered_z_flat = z_buffer_flat.gather(0, flat_pixel_idx)
     gathered_z = gathered_z_flat.view(batch_size, npoints)
     
     # 原始深度
     point_depths = depth_val  # (B, N)
     
-    # 判定
-    # 可见如果: 自己的深度 >= buffer里的最大深度 - bias
-    
-    # 模拟微距时，Bias 要非常小
-    bias = 0.005
+    # 判定可见性：稍微放宽 bias (0.05) 配合膨胀
+    bias = 0.05
     
     # 基础 Z-Buffer 可见性
     is_visible_zbuffer = (point_depths >= (gathered_z - bias))
@@ -212,9 +211,9 @@ def perspective_render_batch(pcl_batch, rotmat_az_batch, rotmat_el_batch,
     if len(valid_depths_in_view) > 0:
         max_depth_val = torch.max(valid_depths_in_view) # 离相机最近的距离 (-z)
         
-        # 只保留最近点后方一定厚度内的点 (比如 0.15 范围)
-        # 相当于把后面的草莓肉和背面全切掉
-        thickness_threshold = 0.15 
+        # 正常深度相机能看到整个表面的凹凸起伏，因此厚度容忍度应能包容整个物体的直径
+        # 物体在归一化后直径约 1.0，设为 1.5 确保不会切掉侧面原本可见的点
+        thickness_threshold = 1.5 
         is_in_focus = point_depths >= (max_depth_val - thickness_threshold)
     else:
         is_in_focus = torch.zeros_like(point_depths, dtype=torch.bool)
@@ -290,7 +289,7 @@ if __name__ == "__main__":
     # from utils.io import read_ply_xyz, export_ply
 
     parser = argparse.ArgumentParser(description='Perspective Render Test')
-    parser.add_argument('--input', type=str, default='/home/tianqi/corepp2/data/test_ply_resample', help='Input PLY')
+    parser.add_argument('--input', type=str, default='/home/tianqi/corepp2/data/scanned_straw_meshed_resize_ml', help='Input PLY')
     parser.add_argument('--output_dir', type=str, default='/home/tianqi/corepp2/data/render_output_perspective')
     parser.add_argument('--num', type=int, default=10)
     args = parser.parse_args()
@@ -346,10 +345,10 @@ if __name__ == "__main__":
             
             result_batch = partial_render_batch_perspective(
                 pcl_single, partial_single, 
-                resolution=200,    
-                camera_dist=2,   # 极近距离 0.5 上次的值：1 1.5
-                fov=70,            # 窄 FOV 上次的值：70 150
-                view_offset=[0, 0.2, 0] # 渲染时的偏移量
+                resolution=300,    
+                camera_dist=2.0,   # 相机适当拉远，以完整拍到整个草莓的正面
+                fov=60,            # 常规深度相机 FOV
+                view_offset=[0, 0, 0] # 对准中心
             )
             
             res_pc = result_batch[0].cpu().numpy()

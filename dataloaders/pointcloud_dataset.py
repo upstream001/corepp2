@@ -5,7 +5,7 @@ import open3d as o3d
 import random
 
 class PointCloudDataset(torch.utils.data.Dataset):
-    def __init__(self, data_source, pad_size, pretrain=None, split=None, use_partial=False, supervised_3d=True):
+    def __init__(self, data_source, pad_size, pretrain=None, split=None, use_partial=False, supervised_3d=True, norm_scale=45.54):
         """
         专用点云数据集加载类，可用于加载草莓数据集、20260301_dataset 等任意仅包含 complete/partial 结构的数据集。
         
@@ -16,12 +16,15 @@ class PointCloudDataset(torch.utils.data.Dataset):
             split: (用于兼容参数) 当前可以不使用，因为我们直接读取文件夹下的所有 ply
             use_partial: 如果为 True, 则读取 `partial` 文件夹而不是 `complete` 文件夹
             supervised_3d: 如果为 True, 会读取 pretrain 下的 latent code 作为 ground truth
+            norm_scale: 外部传入的用于从网络虚拟比例映射回现实世界毫米空间的最大范围缩放乘数。
         """
         self.data_source = data_source
         self.pad_size = pad_size
         self.split = split
         self.use_partial = use_partial
         self.supervised_3d = supervised_3d
+        self.norm_scale = norm_scale
+
         
         if self.supervised_3d and pretrain is not None:
             self.latents_dict = self.get_latents_dict(pretrain)
@@ -147,13 +150,19 @@ class PointCloudDataset(torch.utils.data.Dataset):
             random_list = np.random.choice(num_points, size=self.pad_size, replace=True)
             sampled_points = points[random_list, :]
 
-        # 构造返回字典
+        # 取消数据加载中的归一化操作，保持原始坐标系和物理尺度
+        center = np.zeros(3)
+        scale = 1.0
+
+        
         item = {
             'fruit_id': fruit_id,
             'target_pcd': torch.Tensor(sampled_points).float(), # 同样返回切分后的长度，避免 collate_fn 报错
             'partial_pcd': torch.Tensor(sampled_points).float(),
+            'center': torch.Tensor(center).float(),
+            'scale': torch.tensor(scale).float(),
             'bbox': {
-                'min': torch.Tensor([0.0, 0.0, 0.0]),
+                'min': torch.Tensor([-1.0, -1.0, -1.0]),
                 'max': torch.Tensor([1.0, 1.0, 1.0])
             }
         }

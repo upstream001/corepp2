@@ -65,13 +65,15 @@ class CustomTestDataset(torch.utils.data.Dataset):
                 random_list = np.random.choice(num_points, size=self.pad_size, replace=True)
                 sampled_points = points[random_list, :]
 
-        # --- Global Physical Normalization ---
-        # 对于自然数据，直接应用统一测绘好的全局缩放常数(norm_scale)。
-        # 不使用局部点云自身包围盒，避免抹去不同草莓的大小尺度差异
-        scale = self.norm_scale
-        center = np.zeros(3)
+        # --- Local Physical Normalization ---
+        # 改为局部归一化：将当前部分点云平移至质心并缩放到单位球内，保存缩放因子
+        center = np.mean(sampled_points, axis=0)
+        norm_points = sampled_points - center
+        scale = np.max(np.linalg.norm(norm_points, axis=1))
+        if scale == 0:
+            scale = 1.0
 
-        sampled_points = sampled_points / scale
+        sampled_points = norm_points / scale
         
         item = {
             'fruit_id': fruit_id,
@@ -274,9 +276,7 @@ def main_function(decoder, pretrain, cfg, latent_size, test_data_dir=None):
                     mesh_filename, 
                     start=time.time(), 
                     N=grid_density, 
-                    max_batch=int(2 ** 18),
-                    offset=-center_val,
-                    scale=1.0 / scale_val
+                    max_batch=int(2 ** 18)
                 )
                 
                 # Load the generated mesh back using open3d for the subsequent metric computations
@@ -284,12 +284,12 @@ def main_function(decoder, pretrain, cfg, latent_size, test_data_dir=None):
                 mesh = o3d.io.read_triangle_mesh(mesh_ply_file)
                 mesh.compute_vertex_normals()
 
-                # 体积计算：使用 scipy ConvexHull（100% 可靠，无水密性要求）
+                # 体积计算：先计算归一化空间下的网格体积
                 try:
                     hull = ConvexHull(np.asarray(mesh.vertices))
-                    volume = hull.volume
+                    norm_volume = hull.volume
                 except:
-                    volume = 0
+                    norm_volume = 0
             except Exception as e:
                 print(f"  [Mesh Error] {item['frame_id'][0]}: {e}")
 
@@ -306,10 +306,9 @@ def main_function(decoder, pretrain, cfg, latent_size, test_data_dir=None):
             pr.update(gt, mesh)
             prec, rec, f1, _ = pr.compute_at_threshold(0.005, print_output=False)
 
-            # 因为此前在 create_mesh 时已经传入了动态算出的 offset 和 scale，使得输出的 .ply 文件以及 read_triangle_mesh 生成的 mesh 坐标刚好被复原为了等比例真实的相机系物理大小！
-            # 凸包求得的无量纲体积即是真实的立体体积 (mm³) -> /1000 = 真实物理体积
-            if volume > 0:
-                physical_volume_ml = volume / 1000.0
+            # 凸包求得的 norm_volume 为归一化体积，直接赋予作为物理体积
+            if norm_volume > 0:
+                physical_volume_ml = norm_volume
             else:
                 physical_volume_ml = 0
 

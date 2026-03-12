@@ -116,7 +116,7 @@ python train.py \
 ```bash
 python test.py \
     --cfg ./configs/strawberry.json \
-    --experiment ./deepsdf/experiments/20260301_dataset \
+    --experiment ./deepsdf/experiments/20260301_dataset_aug \
     --checkpoint_decoder 500 
 ```
 
@@ -127,7 +127,7 @@ python test.py \
 ```bash
 python test.py \
     --cfg ./configs/strawberry.json \
-    --experiment ./deepsdf/experiments/20260301_dataset \
+    --experiment ./deepsdf/experiments/20260301_dataset_aug \
     --checkpoint_decoder 500 \
     --test_data_dir /home/tianqi/corepp2/data/render_output_perspective/size38_16384_normalized
 ```
