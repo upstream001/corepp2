@@ -28,66 +28,115 @@ def ortho_render(pcl, rotmat_az, rotmat_el, resolution=50, npoints=2048, box_siz
     point_visible = (plane_distance >= plane_depth)
     point_visible, _ = torch.max(torch.max(point_visible.int(),0)[0],0)
     return point_visible.cpu().numpy()
-def ortho_render_batch(pcl_batch, rotmat_az_batch, rotmat_el_batch, resolution=100, npoints=2048, box_size=1):
-    batch_size, npoints, dimension = pcl_batch.shape
-    rotmat_az_batch = torch.Tensor(rotmat_az_batch).cuda()#B*3*3
-    rotmat_el_batch = torch.Tensor(rotmat_el_batch).cuda()#B*3*3
-    pcl_batch = torch.matmul(pcl_batch, rotmat_az_batch)#B*N*3
-    pcl_batch = torch.matmul(pcl_batch, rotmat_el_batch)#B*N*3
-    depth = -box_size - pcl_batch[:,:,2]#B*N
-    grid_idx = (pcl_batch[:,:,0:2] + box_size)/(2*box_size/resolution)#B*N*2
-    grid_idx = grid_idx.long()#B*N*2
-    grid_idx = torch.cat((grid_idx,torch.arange(npoints).view(1,npoints,-1).cuda().repeat(batch_size, 1,1)),2)#B*N*3
-    grid_idx = torch.cat(((torch.arange(batch_size).view(batch_size,1,-1).cuda().repeat(1, npoints, 1)),grid_idx), 2)#B*N*4
-    grid_idx = grid_idx[:,:,0]*resolution*resolution*npoints + grid_idx[:,:,1]*resolution*npoints + grid_idx[:,:,2]*npoints + grid_idx[:,:,3]#B*N
-    grid_idx = grid_idx.view(batch_size*npoints)#(B*N)
-    device = torch.device('cuda:0')
-    #plane_distance = torch.ones((batch_size*resolution*resolution*npoints)).cuda() * -box_size*2#(B*R*R*N)
-    plane_distance = torch.ones((batch_size*resolution*resolution*npoints), device=device) * -box_size*2#(B*R*R*N)
-    depth = depth.view(batch_size*npoints)#(B*N)
-    plane_distance[grid_idx] = depth#(B*R*R*N)
-    plane_distance = plane_distance.view(batch_size,resolution,resolution,npoints)#B*R*R*N
-    plane_depth,_ = torch.max(plane_distance,3)#B*R*R
-    plane_mask = (plane_depth <= (-box_size * 2 + 1e-6))#B*R*R
-    plane_mask = plane_mask.float() * box_size * 2#B*R*R
-    plane_depth = plane_depth + plane_mask#B*R*R
-    plane_depth -= box_size*2/50 * 1#B*R*R
-    plane_depth = plane_depth.view(batch_size,resolution,resolution,1)#B*R*R*1
-    point_visible = (plane_distance >= plane_depth)
-    point_visible,_ = torch.max(point_visible.int(),1)
-    point_visible,_ = torch.max(point_visible.int(),1)
-    #print(point_visible.shape)
-    #point_visible, _ = torch.max(torch.max(point_visible.int(),1)[0],1)
-    return point_visible.cpu().numpy()
-def partial_render_batch(pcl_batch, partial_batch, resolution=50, box_size=1):    #gt, partial
-    batch_size, npoints, dimension = pcl_batch.shape #[10,2048,3]   #获取gt的bs和Number of points 10,2048,3
-    rotmat_az_batch, rotmat_el_batch, az_batch, el_batch = generate_rotmat(batch_size)
-    #生成一个batch size的随机旋转矩阵对于方位角绕y轴旋转rotmat_az_batch, 对于高度角沿x轴旋转rotmat_el_batch
-    #和对应的方位角和高度角az_batch, el_batch，模拟从不同视角观察每个点云的情况
-    az_batch,el_batch = az_batch.reshape(batch_size,1), el_batch.reshape(batch_size,1)
-    azel_batch = np.concatenate([az_batch,el_batch],1)#调整角度形状，沿第二维合并，得到[batchsize,2]
-    point_visible_batch = ortho_render_batch(pcl_batch, rotmat_az_batch, rotmat_el_batch,resolution, npoints, box_size).reshape(batch_size,npoints,1)
-    #批量正交渲染，对一个批次的3D点云进行处理，生成每个点在特定视角下是否可见的信息。
-    #这个过程包括将点云转换到新的视角、创建深度图，并确定每个点是否被遮挡
-    for i in range(batch_size):
-        point_visible = point_visible_batch[i,:,:]
-        pcl = pcl_batch[i,:,:]
-        point_visible_idx, _ = np.where(point_visible > 0.5)
-        point_visible_idx = np.random.choice(point_visible_idx, 2048)
-        new_pcl = pcl[point_visible_idx]
-        partial_batch[i,:,:] = new_pcl
+def ortho_render_batch(pcl_batch, rotmat_az_batch, rotmat_el_batch, resolution=100, npoints=2048, box_size=1.0):
     """
-    生成部分点云:
-    对于批次中的每个点云：
-    获取该点云的可见点索引（point_visible_idx），这些索引表示从当前视角可以看到的点。
-    通过阈值（0.5）过滤可见点，选择那些大于0.5的点作为可见点。
-    从可见点中随机选择2048个点（使用np.random.choice），生成部分观察到的点云 new_pcl。
-    将生成的部分点云 new_pcl 存储在 partial_batch 对应的位置上。
+    超高效 Z-Buffer 版正交渲染：彻底解决 OOM，显存占用极低。
+    """
+    batch_size, npoints, _ = pcl_batch.shape
+    device = pcl_batch.device
+    
+    # 1. 旋转点云映射到相机坐标系
+    rotmat_az_batch = torch.Tensor(rotmat_az_batch).to(device)
+    rotmat_el_batch = torch.Tensor(rotmat_el_batch).to(device)
+    pcl_batch = torch.matmul(pcl_batch, rotmat_az_batch)
+    pcl_batch = torch.matmul(pcl_batch, rotmat_el_batch)
+    
+    # 2. 计算投影坐标和深度 (-z 轴作为深度，越大越靠前)
+    depth_val = -pcl_batch[:, :, 2]
+    grid_xy = (pcl_batch[:, :, 0:2] + box_size) / (2 * box_size / resolution)
+    u_idx = grid_xy[:, :, 0].long()
+    v_idx = grid_xy[:, :, 1].long()
+    
+    # 获取视口内的点掩码
+    in_view_mask = (u_idx >= 0) & (u_idx < resolution) & (v_idx >= 0) & (v_idx < resolution)
+    
+    # 3. 初始化 Z-Buffer (B, R, R) —— 显存占用极小
+    z_buffer = torch.full((batch_size, resolution, resolution), -box_size * 2, device=device)
+    
+    # 构建扁平化像素索引用于索引 scatter
+    b_idx = torch.arange(batch_size, device=device).view(batch_size, 1).expand(-1, npoints)
+    flat_pixel_idx = (b_idx * (resolution * resolution) + u_idx * resolution + v_idx).view(-1)
+    
+    # 仅处理视口内的点
+    mask_flat = in_view_mask.view(-1)
+    valid_pixel_idx = flat_pixel_idx[mask_flat]
+    valid_depths = depth_val.view(-1)[mask_flat]
+    
+    # 核心：使用 scatter_reduce 完成深度竞争（只保留最前面的点）
+    z_buffer_flat = z_buffer.view(-1)
+    if len(valid_pixel_idx) > 0:
+        z_buffer_flat.scatter_reduce_(0, valid_pixel_idx, valid_depths, reduce='amax', include_self=True)
+    
+    # 4. 判定可见性
+    import torch.nn.functional as F
+    z_buffer = z_buffer.view(batch_size, 1, resolution, resolution)
+    
+    # 两次膨胀以填补离散点云之间的空隙，防止背面点漏光
+    z_buffer = F.max_pool2d(z_buffer, kernel_size=3, stride=1, padding=1)
+    z_buffer = F.max_pool2d(z_buffer, kernel_size=3, stride=1, padding=1)
+    
+    z_buffer_flat = z_buffer.view(-1)
+    
+    # 为每个原始点查询对应像素位置的遮盖深度
+    sampling_idx = (b_idx * resolution * resolution + 
+                    torch.clamp(u_idx, 0, resolution-1) * resolution + 
+                    torch.clamp(v_idx, 0, resolution-1)).view(-1)
+    
+    gathered_z = z_buffer_flat.gather(0, sampling_idx).view(batch_size, npoints)
+    
+    # 判定布尔可见性 (将容差从 0.05 提升至 0.15，允许捕捉更多侧面/边缘的点)
+    is_visible = (depth_val >= (gathered_z - 0.15)) & in_view_mask
+    
+    return is_visible.cpu().numpy()
 
-    这个函数为后续的3D点云处理提供了基础，特别是在模拟不同视角下的点云观察时。
-    通过应用这些旋转矩阵，可以从不同角度“观察”点云，这对于某些应用（如数据增强、3D重建等）非常有用。
+
+def partial_render_batch(pcl_batch, partial_batch, resolution=100, box_size=1.0):
     """
-    return partial_batch , rotmat_az_batch, rotmat_el_batch, azel_batch
+    生成部分点云的主函数。
+    核心原则：使用临时归一化的‘替身’计算遮挡，使用原始坐标的‘本体’采样输出。
+    """
+    batch_size, npoints, dimension = pcl_batch.shape 
+    rotmat_az_batch, rotmat_el_batch, az_batch, el_batch = generate_rotmat(batch_size)
+    
+    az_batch, el_batch = az_batch.reshape(batch_size, 1), el_batch.reshape(batch_size, 1)
+    azel_batch = np.concatenate([az_batch, el_batch], 1)
+    
+    # 1. 准备归一化替身进行可见性判定
+    pcl_for_render = pcl_batch.clone()
+    for i in range(batch_size):
+        c = pcl_for_render[i].mean(dim=0)
+        pcl_for_render[i] -= c
+        s = pcl_for_render[i].norm(dim=-1).max()
+        if s > 1e-6:
+            # 将物体强制放入 [-0.5, 0.5] 视窗内，防止座標越界崩溃
+            pcl_for_render[i] /= (s * 2.0) 
+    
+    # 2. 计算可见性 (此时所有渲染参数基于 box_size=1.0 这个标准范围)
+    point_visible_batch_res = ortho_render_batch(
+        pcl_for_render, rotmat_az_batch, rotmat_el_batch, 
+        resolution=resolution, npoints=npoints, box_size=1.0
+    )
+    point_visible_batch = point_visible_batch_res.reshape(batch_size, npoints, 1)
+    
+    # 3. 采样原始物理坐标点
+    for i in range(batch_size):
+        point_visible = point_visible_batch[i, :, :]
+        pcl = pcl_batch[i, :, :] # 原始物体点
+        
+        point_visible_idx, _ = np.where(point_visible > 0.5)
+        
+        if len(point_visible_idx) > 0:
+            # 随机选择 2048 个可见点
+            choice_indices = np.random.choice(point_visible_idx, 2048, replace=True)
+            new_pcl = pcl[choice_indices]
+            partial_batch[i, :, :] = new_pcl
+        else:
+            # 兜底：如果没看出来可见点，返回原点
+            print(f"Warning: No visible points found for sample {i}")
+            partial_batch[i, :, :] = pcl[:2048]
+            
+    return partial_batch, rotmat_az_batch, rotmat_el_batch, azel_batch
+
 def generate_rotmat(batch_size):
     # 方位角
     az_batch = np.random.rand(batch_size)
@@ -97,10 +146,12 @@ def generate_rotmat(batch_size):
     # 俯仰角
     el_batch = np.random.rand(batch_size)
     # el_batch = (el_batch - 0.5) * np.pi*0.4 # [-0.5, 0.5] * 0.5π -> [-0.25π, 0.25π]
-    # 假设你想让视角限制在 [-30度, +10度] 之间（+10度即限制了上方角度）
-    min_angle = 60 / 180 * np.pi
-    max_angle = 70 / 180 * np.pi
+    # 俯仰角 (仰角)：放宽范围以模拟更多变的拍摄角度
+    # 例如让相机在 [0, 80] 度之间随机，即从侧面到近乎顶部的范围
+    min_angle = 0 / 180 * np.pi
+    max_angle = 80 / 180 * np.pi
     el_batch = np.random.rand(batch_size) * (max_angle - min_angle) + min_angle
+
     rotmat_az_batch = np.array([
         [np.cos(az_batch),     -np.sin(az_batch),    np.zeros(batch_size)],
         [np.sin(az_batch),     np.cos(az_batch),     np.zeros(batch_size)],
@@ -190,7 +241,7 @@ if __name__ == "__main__":
     from utils_file.io import read_ply_xyz, export_ply
 
     parser = argparse.ArgumentParser(description='Realtime Render Test')
-    parser.add_argument('--input', type=str, default='/home/tianqi/DAPoinTr/data/scanned_straw_meshed', help='Input PLY file or directory')
+    parser.add_argument('--input', type=str, default='/home/tianqi/corepp2/data/scanned_straw_meshed_resize_ml', help='Input PLY file or directory')
     parser.add_argument('--vis', action='store_true', help='Visualize the results')
     parser.add_argument('--save', action='store_true', default=True, help='Save the results to disk')
     parser.add_argument('--output_dir', type=str, default='data/render_output', help='Directory to save results')

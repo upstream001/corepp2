@@ -100,10 +100,16 @@ if __name__ == "__main__":
         viewpoints = points + normals
         swl_points = np.concatenate([points, viewpoints], axis=1)
         
+        # 根据当前物体大小按比例缩放 SDF 边界采样距离，以适应数据增强产生的不统一比例
+        bbox_extent = np.max(points.max(axis=0) - points.min(axis=0))  
+        baseline_diameter = 0.4 # 作为对比口径的基础比例预设值
+        adaptive_scale = bbox_extent / baseline_diameter
+        
         # calculate sampling logic
         no_samples_per_point = int(np.ceil(args.no_of_samples / num_points))
         pos, neg = generate_tsdf_samples(swl_points, no_samples_per_point=no_samples_per_point,
-                                tsdf_positive=args.tsdf_positive, tsdf_negative=args.tsdf_negative)
+                                tsdf_positive=args.tsdf_positive * adaptive_scale, 
+                                tsdf_negative=args.tsdf_negative * adaptive_scale)
         
         # ==================== 关键修复：添加 free space 采样 ====================
         # 参考原版 o3d_utils.py 的 sample_freespace 函数

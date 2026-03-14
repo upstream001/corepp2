@@ -150,10 +150,18 @@ class PointCloudDataset(torch.utils.data.Dataset):
             random_list = np.random.choice(num_points, size=self.pad_size, replace=True)
             sampled_points = points[random_list, :]
 
-        # 取消数据加载中的归一化操作，保持原始坐标系和物理尺度
-        center = np.zeros(3)
+        # 进行 Zero-Centering (中心化) 以稳固网络梯度，但保持真实物理比例(不进行 Scale 归一化)
+        center = np.mean(points, axis=0) # 获取整点云的几何中心
+        sampled_points = sampled_points - center
         scale = 1.0
 
+        # 根据采样得到的点集计算自适应外包盒子，并预留 10% 缓冲，防止计算 3D 损失时真实面被截断
+        bbox_min = np.min(sampled_points, axis=0)
+        bbox_max = np.max(sampled_points, axis=0)
+        margin = (bbox_max - bbox_min) * 0.1
+        margin = np.maximum(margin, 1e-4) # 防止点云存在退化（例如平面）
+        bbox_min -= margin
+        bbox_max += margin
         
         item = {
             'fruit_id': fruit_id,
@@ -162,8 +170,12 @@ class PointCloudDataset(torch.utils.data.Dataset):
             'center': torch.Tensor(center).float(),
             'scale': torch.tensor(scale).float(),
             'bbox': {
-                'min': torch.Tensor([-1.0, -1.0, -1.0]),
-                'max': torch.Tensor([1.0, 1.0, 1.0])
+                'xmin': torch.tensor(bbox_min[0]).float(),
+                'xmax': torch.tensor(bbox_max[0]).float(),
+                'ymin': torch.tensor(bbox_min[1]).float(),
+                'ymax': torch.tensor(bbox_max[1]).float(),
+                'zmin': torch.tensor(bbox_min[2]).float(),
+                'zmax': torch.tensor(bbox_max[2]).float()
             }
         }
 

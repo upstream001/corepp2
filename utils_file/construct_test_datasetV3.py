@@ -6,14 +6,14 @@ from pathlib import Path
 
 def main():
     # 输入目录
-    complete_pc_dir = '/home/tianqi/PoinTr/data/scanned_straw_meshed'
+    complete_pc_dir = '/home/tianqi/corepp2/data/scanned_straw_meshed_resize_ml'
     partial_dirs_base = [
-        '/home/tianqi/PoinTr/data/render_output_perspective2',
-        '/home/tianqi/PoinTr/data/render_output'
+        '/home/tianqi/corepp2/data/render_output_perspective',
+        '/home/tianqi/corepp2/data/render_output'
     ]
     
     # 输出目录
-    output_base_dir = '/home/tianqi/PoinTr/data/20260301_dataset'
+    output_base_dir = '/home/tianqi/corepp2/data/20260312_dataset'
     partial_out_dir = os.path.join(output_base_dir, 'partial')
     complete_out_dir = os.path.join(output_base_dir, 'complete')
     

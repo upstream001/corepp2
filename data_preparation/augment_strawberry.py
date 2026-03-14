@@ -12,8 +12,8 @@ from tqdm import tqdm
 def main():
     parser = argparse.ArgumentParser(description="专为草莓数据集独立扩增点云 (仅扩增坐标尺寸/形变，不管真值 SDF)")
     parser.add_argument("--json_config", default="data_preparation/augment.json", help="json filename with the parameters for augmentation")
-    parser.add_argument("--src", default="/home/tianqi/corepp2/data/20260301_dataset", help="源数据集路径")
-    parser.add_argument("--dst", default="/home/tianqi/corepp2/data/20260301_dataset_aug", help="输出增强数据集的路径")
+    parser.add_argument("--src", default="/home/tianqi/corepp2/data/20260312_dataset", help="源数据集路径")
+    parser.add_argument("--dst", default="/home/tianqi/corepp2/data/20260312_dataset_aug", help="输出增强数据集的路径")
     
     args = parser.parse_args()
 

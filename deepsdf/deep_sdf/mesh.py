@@ -18,10 +18,11 @@ def create_mesh(
 
     decoder.eval()
 
-    # 扩大体素网格范围，防止草莓底部被截断
-    # 草莓 SDF 数据 Y 轴最小值可达 -0.59，原始 [-0.5,0.5] 会裁掉底部
-    voxel_origin = [-0.7, -0.7, -0.7]
-    voxel_size = 1.4 / (N - 1)
+    # 根据物理尺寸调整体素网格范围。对于非归一化点云，范围扩大至 [-3.0, 3.0]
+    # 之前归一化使用的是 [-0.7, 0.7]
+    grid_range = 6.0
+    voxel_origin = [-3.0, -3.0, -3.0]
+    voxel_size = grid_range / (N - 1)
 
     overall_index = torch.arange(0, N ** 3, 1, out=torch.LongTensor())
     samples = torch.zeros(N ** 3, 4)
@@ -144,8 +145,9 @@ def convert_sdf_samples_to_ply(
                 max_bound = cluster_verts.max(axis=0)
                 ranges = max_bound - min_bound
                 
-                # 外围伪壳会撑满整个 [-0.7, 0.7] 盒子（约 1.4 大小）
-                is_boundary_artifact = (ranges[0] > 1.33 and ranges[1] > 1.33 and ranges[2] > 1.33)
+                # 外围伪壳会自动填充到接近采样边界。之前的阈值 1.33 是针对 1.4 的范围。
+                # 现在范围是 6.0，我们将阈值设为 5.8 (约 96%)
+                is_boundary_artifact = (ranges[0] > 5.8 and ranges[1] > 5.8 and ranges[2] > 5.8)
                 
                 if not is_boundary_artifact:
                     valid_clusters.append((cluster_idx, cluster_n_triangles[cluster_idx]))
