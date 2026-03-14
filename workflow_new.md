@@ -100,7 +100,7 @@ python train_deep_sdf.py --experiment ./deepsdf/experiments/20260312_dataset
 ```bash
 python train.py \
     --cfg ./configs/strawberry.json \
-    --experiment ./deepsdf/experiments/20260312_dataset_aug \
+    --experiment ./deepsdf/experiments/20260312_dataset \
     --checkpoint_decoder 500
 ```
 在这里点云编码器（Encoder）会接收点云，预测出一组 Latent Code，并直接与 DeepSDF 训练阶段生成的真实 Latent Code 比较误差来更新自身权重。
@@ -116,7 +116,7 @@ python train.py \
 ```bash
 python test.py \
     --cfg ./configs/strawberry.json \
-    --experiment ./deepsdf/experiments/20260312_dataset_aug \
+    --experiment ./deepsdf/experiments/20260312_dataset \
     --checkpoint_decoder 500 
 ```
 

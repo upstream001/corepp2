@@ -298,12 +298,38 @@ def main_function(decoder, pretrain, cfg, latent_size, test_data_dir=None):
             if n_iter > 0:
                 exec_time.append(inference_time)
 
+            # --- Metric Normalization: 在计算衡量指标前临时缩放到单位球内，以对齐固定的阈值判定范围 ---
+            gt_pts = np.asarray(gt.points)
+            mesh_pts = np.asarray(mesh.vertices)
+            
+            # 找到以质心为原点的缩放上限
+            local_center = np.mean(gt_pts, axis=0)
+            shifted_gt = gt_pts - local_center
+            local_scale = np.max(np.linalg.norm(shifted_gt, axis=1)) 
+            if local_scale == 0: local_scale = 1.0
+
+            # 缩放供检测的独立对象副本
+            eval_gt = o3d.geometry.PointCloud()
+            eval_gt.points = o3d.utility.Vector3dVector(shifted_gt / local_scale)
+            
+            eval_mesh = o3d.geometry.TriangleMesh()
+            eval_mesh.vertices = o3d.utility.Vector3dVector((mesh_pts - local_center) / local_scale)
+            eval_mesh.triangles = mesh.triangles
+
+            from metrics_3d.metric import Metrics3D
+            _m = Metrics3D()
+            print("Vertices length before cd:", len(eval_mesh.vertices))
+            print("Triangles length before cd:", len(eval_mesh.triangles))
+            print("Is Eval Mesh considered empty?", _m.prediction_is_empty(eval_mesh))
+            print("Triangles length AFTER prediction_is_empty check:", len(eval_mesh.triangles))
+
             cd.reset()
-            cd.update(gt, mesh)
+            cd.update(eval_gt, eval_mesh)
             chamfer_distance = cd.compute(print_output=False)
 
             pr.reset()
-            pr.update(gt, mesh)
+            # 缩放回单位球后再利用原本0.005严格容忍度的预加载类
+            pr.update(eval_gt, eval_mesh)
             prec, rec, f1, _ = pr.compute_at_threshold(0.005, print_output=False)
 
             # 凸包求得的 norm_volume 为归一化体积，直接赋予作为物理体积
