@@ -105,7 +105,7 @@ import numpy as np
 import time
 import json
 
-from utils import sdf2mesh_cuda, tensor_dict_2_float_dict
+from utils import sdf2mesh_cuda
 import skimage.measure
 from scipy.spatial import ConvexHull
 from metrics_3d import chamfer_distance, precision_recall
@@ -116,6 +116,44 @@ pr = precision_recall.PrecisionRecall(0.001, 0.01, 10)
 torch.autograd.set_detect_anomaly(True)
 import pandas as pd
 from sklearn.metrics import mean_squared_error
+
+
+def _map_vertices_from_canonical_cube(vertices, bbox_min, bbox_max, cube_min=-3.0, cube_max=3.0):
+    if vertices.size == 0:
+        return vertices
+    cube_size = cube_max - cube_min
+    if cube_size <= 0:
+        return vertices
+    vertices_01 = (vertices - cube_min) / cube_size
+    return bbox_min + vertices_01 * (bbox_max - bbox_min)
+
+
+def _compute_volume_ml(mesh, unit="cm"):
+    if len(mesh.vertices) == 0 or len(mesh.triangles) == 0:
+        return 0.0
+
+    mesh.remove_duplicated_vertices()
+    mesh.remove_duplicated_triangles()
+    mesh.remove_degenerate_triangles()
+    mesh.remove_unreferenced_vertices()
+
+    if unit == "mm":
+        factor = 1.0 / 1000.0
+    elif unit == "m":
+        factor = 1_000_000.0
+    else:
+        factor = 1.0  # cm -> mL
+
+    try:
+        if mesh.is_watertight():
+            return abs(float(mesh.get_volume())) * factor
+    except Exception:
+        pass
+
+    try:
+        return float(ConvexHull(np.asarray(mesh.vertices)).volume) * factor
+    except Exception:
+        return 0.0
 
 
 def main_function(decoder, pretrain, cfg, latent_size, test_data_dir=None):
@@ -139,6 +177,10 @@ def main_function(decoder, pretrain, cfg, latent_size, test_data_dir=None):
         param = json.load(json_file)
 
     device = 'cuda'
+    metric_threshold = float(param.get("metric_threshold", 0.005))
+    volume_unit = str(param.get("volume_unit", "cm")).lower()
+    volume_scale_factor = float(param.get("volume_scale_factor", 1.0))
+    remap_mesh_to_gt_bbox = bool(param.get("remap_mesh_to_gt_bbox", False))
 
     # creating variables for 3d grid for diff SDF renderer
     threshold = param['threshold']
@@ -222,23 +264,17 @@ def main_function(decoder, pretrain, cfg, latent_size, test_data_dir=None):
 
         for n_iter, item in enumerate(tqdm(iter(dataset))):
             volume, chamfer_distance, prec, rec, f1 = 0, 0, 0, 0, 0
-            try:
-                box = tensor_dict_2_float_dict(item['bbox'])
-            except:
-                box = {
-                    'xmin': -1.0,
-                    'xmax': 1.0,
-                    'ymin': -1.0,
-                    'ymax': 1.0,
-                    'zmin': -1.0,
-                    'zmax': 1.0
-                }
 
             cs = o3d.geometry.TriangleMesh.create_coordinate_frame(0.05)
             gt = o3d.geometry.PointCloud()
             gt.points = o3d.utility.Vector3dVector(item['target_pcd'][0].numpy())
+            gt_pts = np.asarray(gt.points)
+            # Use tight bbox from GT points to avoid 10% padding inflation from dataloader bbox.
+            bbox_min = gt_pts.min(axis=0)
+            bbox_max = gt_pts.max(axis=0)
 
             start = time.time()
+            mesh = None
 
             # unpacking inputs
             if param['encoder'] not in ['point_cloud', 'point_cloud_large', 'foldnet', 'pointnext']:
@@ -284,22 +320,39 @@ def main_function(decoder, pretrain, cfg, latent_size, test_data_dir=None):
                 mesh = o3d.io.read_triangle_mesh(mesh_ply_file)
                 mesh.compute_vertex_normals()
 
-                # 体积计算：先计算归一化空间下的网格体积
-                try:
-                    hull = ConvexHull(np.asarray(mesh.vertices))
-                    norm_volume = hull.volume
-                except:
-                    norm_volume = 0
+                # Optional remap from canonical cube to GT bbox.
+                # Keep disabled by default because some datasets are already in physical coordinates.
+                if remap_mesh_to_gt_bbox:
+                    mesh_pts = np.asarray(mesh.vertices)
+                    mesh_pts = _map_vertices_from_canonical_cube(mesh_pts, bbox_min, bbox_max)
+                    mesh.vertices = o3d.utility.Vector3dVector(mesh_pts)
+
+                volume_ml = _compute_volume_ml(mesh, unit=volume_unit)
+                volume_ml *= volume_scale_factor
             except Exception as e:
                 print(f"  [Mesh Error] {item['frame_id'][0]}: {e}")
+                volume_ml = 0.0
 
             inference_time = time.time() - start
 
             if n_iter > 0:
                 exec_time.append(inference_time)
 
+            if mesh is None:
+                cur_data = {
+                    'fruit_id': item['fruit_id'][0],
+                    'frame_id': item['frame_id'][0],
+                    'mesh_volume_ml': round(volume_ml, 6),
+                    'chamfer_distance': 0.0,
+                    'precision': 0.0,
+                    'recall': 0.0,
+                    'f1': 0.0
+                }
+                save_df = pd.concat([save_df, pd.DataFrame([cur_data])], ignore_index=True)
+                save_df.to_csv("shape_completion_results.csv", mode='w+', index=False)
+                continue
+
             # --- Metric Normalization: 在计算衡量指标前临时缩放到单位球内，以对齐固定的阈值判定范围 ---
-            gt_pts = np.asarray(gt.points)
             mesh_pts = np.asarray(mesh.vertices)
             
             # 找到以质心为原点的缩放上限
@@ -316,32 +369,18 @@ def main_function(decoder, pretrain, cfg, latent_size, test_data_dir=None):
             eval_mesh.vertices = o3d.utility.Vector3dVector((mesh_pts - local_center) / local_scale)
             eval_mesh.triangles = mesh.triangles
 
-            from metrics_3d.metric import Metrics3D
-            _m = Metrics3D()
-            print("Vertices length before cd:", len(eval_mesh.vertices))
-            print("Triangles length before cd:", len(eval_mesh.triangles))
-            print("Is Eval Mesh considered empty?", _m.prediction_is_empty(eval_mesh))
-            print("Triangles length AFTER prediction_is_empty check:", len(eval_mesh.triangles))
-
             cd.reset()
             cd.update(eval_gt, eval_mesh)
             chamfer_distance = cd.compute(print_output=False)
 
             pr.reset()
-            # 缩放回单位球后再利用原本0.005严格容忍度的预加载类
             pr.update(eval_gt, eval_mesh)
-            prec, rec, f1, _ = pr.compute_at_threshold(0.005, print_output=False)
-
-            # 凸包求得的 norm_volume 为归一化体积，直接赋予作为物理体积
-            if norm_volume > 0:
-                physical_volume_ml = norm_volume
-            else:
-                physical_volume_ml = 0
+            prec, rec, f1, _ = pr.compute_at_threshold(metric_threshold, print_output=False)
 
             cur_data = {
                 'fruit_id': item['fruit_id'][0],
                 'frame_id': item['frame_id'][0],
-                'mesh_volume_ml': round(physical_volume_ml, 2),
+                'mesh_volume_ml': round(volume_ml, 6),
                 'chamfer_distance': round(chamfer_distance, 6),
                 'precision': round(prec, 1),
                 'recall': round(rec, 1),
