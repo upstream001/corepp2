@@ -156,6 +156,11 @@ def _compute_volume_ml(mesh, unit="cm"):
         return 0.0
 
 
+def _threshold_tag(t):
+    s = f"{float(t):.4f}".rstrip("0").rstrip(".")
+    return s.replace(".", "p")
+
+
 def main_function(decoder, pretrain, cfg, latent_size, test_data_dir=None):
     torch.manual_seed(133)
     np.random.seed(133)
@@ -178,9 +183,25 @@ def main_function(decoder, pretrain, cfg, latent_size, test_data_dir=None):
 
     device = 'cuda'
     metric_threshold = float(param.get("metric_threshold", 0.005))
+    metric_thresholds = param.get("metric_thresholds", [0.005, 0.01, 0.02, 0.03, 0.05])
+    metric_thresholds = sorted({float(t) for t in metric_thresholds})
+    if metric_threshold not in metric_thresholds:
+        metric_thresholds.append(metric_threshold)
+        metric_thresholds = sorted(metric_thresholds)
+
+    multi_columns = list(columns)
+    for t in metric_thresholds:
+        tag = _threshold_tag(t)
+        multi_columns.extend([f"precision_t{tag}", f"recall_t{tag}", f"f1_t{tag}"])
+    save_df_multi = pd.DataFrame(columns=multi_columns)
+
     volume_unit = str(param.get("volume_unit", "cm")).lower()
     volume_scale_factor = float(param.get("volume_scale_factor", 1.0))
     remap_mesh_to_gt_bbox = bool(param.get("remap_mesh_to_gt_bbox", False))
+    pr_max_t = max(0.01, max(metric_thresholds))
+    pr_num = max(10, int(round((pr_max_t - 0.001) / 0.001)) + 1)
+    cd_metric = chamfer_distance.ChamferDistance()
+    pr_metric = precision_recall.PrecisionRecall(0.001, pr_max_t, pr_num)
 
     # creating variables for 3d grid for diff SDF renderer
     threshold = param['threshold']
@@ -263,7 +284,7 @@ def main_function(decoder, pretrain, cfg, latent_size, test_data_dir=None):
     with torch.no_grad():
 
         for n_iter, item in enumerate(tqdm(iter(dataset))):
-            volume, chamfer_distance, prec, rec, f1 = 0, 0, 0, 0, 0
+            volume, chamfer_dist_value, prec, rec, f1 = 0, 0, 0, 0, 0
 
             cs = o3d.geometry.TriangleMesh.create_coordinate_frame(0.05)
             gt = o3d.geometry.PointCloud()
@@ -350,6 +371,15 @@ def main_function(decoder, pretrain, cfg, latent_size, test_data_dir=None):
                 }
                 save_df = pd.concat([save_df, pd.DataFrame([cur_data])], ignore_index=True)
                 save_df.to_csv("shape_completion_results.csv", mode='w+', index=False)
+
+                cur_multi = dict(cur_data)
+                for t in metric_thresholds:
+                    tag = _threshold_tag(t)
+                    cur_multi[f"precision_t{tag}"] = 0.0
+                    cur_multi[f"recall_t{tag}"] = 0.0
+                    cur_multi[f"f1_t{tag}"] = 0.0
+                save_df_multi = pd.concat([save_df_multi, pd.DataFrame([cur_multi])], ignore_index=True)
+                save_df_multi.to_csv("shape_completion_results_multi_threshold.csv", mode='w+', index=False)
                 continue
 
             # --- Metric Normalization: 在计算衡量指标前临时缩放到单位球内，以对齐固定的阈值判定范围 ---
@@ -369,19 +399,24 @@ def main_function(decoder, pretrain, cfg, latent_size, test_data_dir=None):
             eval_mesh.vertices = o3d.utility.Vector3dVector((mesh_pts - local_center) / local_scale)
             eval_mesh.triangles = mesh.triangles
 
-            cd.reset()
-            cd.update(eval_gt, eval_mesh)
-            chamfer_distance = cd.compute(print_output=False)
+            cd_metric.reset()
+            cd_metric.update(eval_gt, eval_mesh)
+            chamfer_dist_value = cd_metric.compute(print_output=False)
 
-            pr.reset()
-            pr.update(eval_gt, eval_mesh)
-            prec, rec, f1, _ = pr.compute_at_threshold(metric_threshold, print_output=False)
+            pr_metric.reset()
+            pr_metric.update(eval_gt, eval_mesh)
+            metrics_by_t = {}
+            for t in metric_thresholds:
+                p_t, r_t, f_t, _ = pr_metric.compute_at_threshold(t, print_output=False)
+                metrics_by_t[t] = (p_t, r_t, f_t)
+
+            prec, rec, f1 = metrics_by_t[metric_threshold]
 
             cur_data = {
                 'fruit_id': item['fruit_id'][0],
                 'frame_id': item['frame_id'][0],
                 'mesh_volume_ml': round(volume_ml, 6),
-                'chamfer_distance': round(chamfer_distance, 6),
+                'chamfer_distance': round(chamfer_dist_value, 6),
                 'precision': round(prec, 1),
                 'recall': round(rec, 1),
                 'f1': round(f1, 1)
@@ -390,9 +425,20 @@ def main_function(decoder, pretrain, cfg, latent_size, test_data_dir=None):
             save_df = pd.concat([save_df, pd.DataFrame([cur_data])], ignore_index=True)
             save_df.to_csv("shape_completion_results.csv", mode='w+', index=False)
 
+            cur_multi = dict(cur_data)
+            for t in metric_thresholds:
+                p_t, r_t, f_t = metrics_by_t[t]
+                tag = _threshold_tag(t)
+                cur_multi[f"precision_t{tag}"] = round(p_t, 1)
+                cur_multi[f"recall_t{tag}"] = round(r_t, 1)
+                cur_multi[f"f1_t{tag}"] = round(f_t, 1)
+            save_df_multi = pd.concat([save_df_multi, pd.DataFrame([cur_multi])], ignore_index=True)
+            save_df_multi.to_csv("shape_completion_results_multi_threshold.csv", mode='w+', index=False)
+
 
         print(f"Average time for 3D shape completion, including postprocessing: {np.mean(exec_time)*1e3:.1f} ms")
         print("Results saved in: " + os.getcwd() + "/shape_completion_results.csv")
+        print("Multi-threshold results saved in: " + os.getcwd() + "/shape_completion_results_multi_threshold.csv")
 
 if __name__ == "__main__":
 
