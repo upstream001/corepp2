@@ -104,6 +104,7 @@ import numpy as np
 
 import time
 import json
+import csv
 
 from utils import sdf2mesh_cuda
 import skimage.measure
@@ -161,6 +162,78 @@ def _threshold_tag(t):
     return s.replace(".", "p")
 
 
+def _load_ground_truth_volumes(gt_csv_path):
+    gt_volumes = {}
+    if not os.path.exists(gt_csv_path):
+        return gt_volumes
+
+    with open(gt_csv_path, "r", encoding="utf-8") as f:
+        for row in csv.DictReader(f):
+            filename = (row.get("filename") or "").strip()
+            volume_ml = (row.get("volume_ml") or "").strip()
+            if not filename or not volume_ml:
+                continue
+            try:
+                gt_volumes[filename] = float(volume_ml)
+            except ValueError:
+                continue
+
+    return gt_volumes
+
+
+def _load_complete_volume_lookup(data_source, gt_csv_path):
+    volume_lookup = {}
+    if not data_source:
+        return volume_lookup
+
+    mapping_path = os.path.join(data_source, "mapping.json")
+    if not os.path.exists(mapping_path):
+        return volume_lookup
+
+    gt_volumes = _load_ground_truth_volumes(gt_csv_path)
+    if not gt_volumes:
+        return volume_lookup
+
+    with open(mapping_path, "r", encoding="utf-8") as f:
+        mapping = json.load(f)
+
+    for partial_name, complete_name in mapping.items():
+        if complete_name not in gt_volumes:
+            continue
+        volume_ml = gt_volumes[complete_name]
+        volume_lookup[partial_name] = volume_ml
+        volume_lookup[os.path.splitext(partial_name)[0]] = volume_ml
+
+    return volume_lookup
+
+
+def _write_aligned_csv(dataframe, output_path):
+    if dataframe.empty:
+        dataframe.to_csv(output_path, index=False)
+        return
+
+    str_df = dataframe.copy()
+    str_df = str_df.replace({np.nan: ""})
+    for col in str_df.columns:
+        str_df[col] = str_df[col].map(lambda v: str(v))
+
+    widths = {}
+    for col in str_df.columns:
+        cell_width = str_df[col].map(len).max() if len(str_df[col]) > 0 else 0
+        widths[col] = max(len(col), cell_width)
+
+    lines = []
+    header = ", ".join(col.ljust(widths[col]) for col in str_df.columns)
+    lines.append(header)
+
+    for _, row in str_df.iterrows():
+        line = ", ".join(row[col].ljust(widths[col]) for col in str_df.columns)
+        lines.append(line)
+
+    with open(output_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+
+
 def main_function(decoder, pretrain, cfg, latent_size, test_data_dir=None):
     torch.manual_seed(133)
     np.random.seed(133)
@@ -168,6 +241,7 @@ def main_function(decoder, pretrain, cfg, latent_size, test_data_dir=None):
     df = pd.DataFrame()
     columns = ['fruit_id',
                 'frame_id',
+                'complete_volume_ml',
                 'mesh_volume_ml',
                 'chamfer_distance',
                 'precision',
@@ -198,6 +272,10 @@ def main_function(decoder, pretrain, cfg, latent_size, test_data_dir=None):
     volume_unit = str(param.get("volume_unit", "cm")).lower()
     volume_scale_factor = float(param.get("volume_scale_factor", 1.0))
     remap_mesh_to_gt_bbox = bool(param.get("remap_mesh_to_gt_bbox", False))
+    repo_root = os.path.dirname(os.path.abspath(__file__))
+    gt_csv_path = param.get("ground_truth_csv", os.path.join(repo_root, "ground_truth.csv"))
+    mapping_data_source = test_data_dir if test_data_dir is not None else param.get("data_dir")
+    complete_volume_lookup = _load_complete_volume_lookup(mapping_data_source, gt_csv_path)
     pr_max_t = max(0.01, max(metric_thresholds))
     pr_num = max(10, int(round((pr_max_t - 0.001) / 0.001)) + 1)
     cd_metric = chamfer_distance.ChamferDistance()
@@ -285,6 +363,8 @@ def main_function(decoder, pretrain, cfg, latent_size, test_data_dir=None):
 
         for n_iter, item in enumerate(tqdm(iter(dataset))):
             volume, chamfer_dist_value, prec, rec, f1 = 0, 0, 0, 0, 0
+            frame_id = item['frame_id'][0]
+            complete_volume_ml = complete_volume_lookup.get(frame_id)
 
             cs = o3d.geometry.TriangleMesh.create_coordinate_frame(0.05)
             gt = o3d.geometry.PointCloud()
@@ -362,7 +442,8 @@ def main_function(decoder, pretrain, cfg, latent_size, test_data_dir=None):
             if mesh is None:
                 cur_data = {
                     'fruit_id': item['fruit_id'][0],
-                    'frame_id': item['frame_id'][0],
+                    'frame_id': frame_id,
+                    'complete_volume_ml': round(complete_volume_ml, 6) if complete_volume_ml is not None else np.nan,
                     'mesh_volume_ml': round(volume_ml, 6),
                     'chamfer_distance': 0.0,
                     'precision': 0.0,
@@ -379,7 +460,7 @@ def main_function(decoder, pretrain, cfg, latent_size, test_data_dir=None):
                     cur_multi[f"recall_t{tag}"] = 0.0
                     cur_multi[f"f1_t{tag}"] = 0.0
                 save_df_multi = pd.concat([save_df_multi, pd.DataFrame([cur_multi])], ignore_index=True)
-                save_df_multi.to_csv("shape_completion_results_multi_threshold.csv", mode='w+', index=False)
+                _write_aligned_csv(save_df_multi, "shape_completion_results_multi_threshold.csv")
                 continue
 
             # --- Metric Normalization: 在计算衡量指标前临时缩放到单位球内，以对齐固定的阈值判定范围 ---
@@ -414,7 +495,8 @@ def main_function(decoder, pretrain, cfg, latent_size, test_data_dir=None):
 
             cur_data = {
                 'fruit_id': item['fruit_id'][0],
-                'frame_id': item['frame_id'][0],
+                'frame_id': frame_id,
+                'complete_volume_ml': round(complete_volume_ml, 6) if complete_volume_ml is not None else np.nan,
                 'mesh_volume_ml': round(volume_ml, 6),
                 'chamfer_distance': round(chamfer_dist_value, 6),
                 'precision': round(prec, 1),
@@ -433,7 +515,7 @@ def main_function(decoder, pretrain, cfg, latent_size, test_data_dir=None):
                 cur_multi[f"recall_t{tag}"] = round(r_t, 1)
                 cur_multi[f"f1_t{tag}"] = round(f_t, 1)
             save_df_multi = pd.concat([save_df_multi, pd.DataFrame([cur_multi])], ignore_index=True)
-            save_df_multi.to_csv("shape_completion_results_multi_threshold.csv", mode='w+', index=False)
+            _write_aligned_csv(save_df_multi, "shape_completion_results_multi_threshold.csv")
 
 
         print(f"Average time for 3D shape completion, including postprocessing: {np.mean(exec_time)*1e3:.1f} ms")
