@@ -3,15 +3,18 @@ import json
 import argparse
 import random
 
-def create_split_file(data_dir, train_ratio=0.8, val_ratio=0.1, output_file=None):
+def create_split_file(data_dir, train_ratio=0.8, val_ratio=0.1, output_file=None, seed=42):
     """
     Reads the complete directory of the point cloud dataset and splits it
-    into train, val, and test sets.
+    into train, val, and test sets using a reproducible random shuffle.
     """
     complete_dir = os.path.join(data_dir, "complete")
     if not os.path.exists(complete_dir):
         print(f"Error: Could not find {complete_dir}")
         return
+
+    if not (0 < train_ratio < 1) or not (0 <= val_ratio < 1) or train_ratio + val_ratio >= 1:
+        raise ValueError("Invalid split ratios: require 0 < train < 1, 0 <= val < 1, and train + val < 1.")
 
     # List all point cloud files
     all_files = []
@@ -21,7 +24,8 @@ def create_split_file(data_dir, train_ratio=0.8, val_ratio=0.1, output_file=None
             all_files.append(fid)
 
     all_files.sort()
-    # random.shuffle(all_files)  # Shuffle if needed before splitting
+    rng = random.Random(seed)
+    rng.shuffle(all_files)
 
     num_files = len(all_files)
     train_end = int(num_files * train_ratio)
@@ -33,6 +37,7 @@ def create_split_file(data_dir, train_ratio=0.8, val_ratio=0.1, output_file=None
 
     print(f"Total models: {num_files}")
     print(f"Train: {len(train_split)}, Val: {len(val_split)}, Test: {len(test_split)}")
+    print(f"Random seed: {seed}")
 
     # Standard dataloader split (split.json)
     split_dict = {
@@ -84,11 +89,11 @@ if __name__ == "__main__":
     parser.add_argument("--deepsdf_splits_dir", default="./deepsdf/experiments/splits", help="Where to output DeepSDF split json files")
     parser.add_argument("--train", type=float, default=0.8)
     parser.add_argument("--val", type=float, default=0.1)
+    parser.add_argument("--seed", type=int, default=42, help="Random seed used to shuffle samples before splitting")
     
     args = parser.parse_args()
     
-    create_split_file(args.data_dir, args.train, args.val)
+    create_split_file(args.data_dir, args.train, args.val, seed=args.seed)
     
     split_file_path = os.path.join(args.data_dir, "split.json")
     create_deepsdf_splits(args.data_dir, split_file_path, args.deepsdf_splits_dir)
-

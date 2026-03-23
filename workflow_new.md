@@ -45,11 +45,11 @@ python data_preparation/prepare_strawberry_sdf.py --src /home/tianqi/corepp2/dat
 ```
 
 **4. 划分训练/验证/测试集 (Make Splits)**
-编写了专门的切分脚本 `data_preparation/make_strawberry_splits.py`。该脚本会自动读取数据集下的所有的实例，并按 `8:1:1` 的比例进行划分：
+编写了专门的切分脚本 `data_preparation/make_strawberry_splits.py`。该脚本会自动读取数据集下的所有实例，先按固定随机种子打乱，再按 `8:1:1` 的比例进行可复现的随机划分：
 1. 生成全局的 `split.json` 并放置在数据集根目录
 2. 生成专供 DeepSDF 使用的 `{dataset_name}_train.json`, `{dataset_name}_val.json`, `{dataset_name}_test.json` 文件放置于 `deepsdf/experiments/splits` 中以备后用。
 ```bash
-python data_preparation/make_strawberry_splits.py --data_dir /home/tianqi/corepp2/data/20260312_dataset
+python data_preparation/make_strawberry_splits.py --data_dir /home/tianqi/corepp2/data/20260312_dataset --seed 42
 ```
 
 ---
