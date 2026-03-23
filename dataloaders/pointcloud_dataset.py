@@ -96,7 +96,8 @@ class PointCloudDataset(torch.utils.data.Dataset):
                         else:
                             print(
                                 f"[Warning] Matrix rows ({latents_matrix.shape[0]}) mismatch "
-                                f"DeepSDF split size ({len(instance_names)})."
+                                f"DeepSDF split size ({len(instance_names)}). "
+                                "This usually means the matrix only stores train latents and cannot supervise the current split."
                             )
                     else:
                         print(f"[Warning] Cannot find DeepSDF split definition at {split_file} to map the latent matrix.")

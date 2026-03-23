@@ -74,8 +74,10 @@ python train_deep_sdf.py --experiment ./deepsdf/experiments/20260312_dataset
 
 这部分就是你关注的编码器训练。因为没有前置的 RGB 图像，我们需要配置一个专用于处理点云特征的网络（比如 Point Cloud Encoder 或 FoldNet）。
 
-> **关于 Latent Codes 真值（Ground Truth）的重要改动：**
-> 在原版的测试时优化流程中，需要在训练完了 DeepSDF 之后强行再跑一趟 `reconstruct_deep_sdf.py` 取出重构真值供此时的 Encoder 学习，效率偏低且带来不可靠的噪音。现在 `test.py` 和 Dataset 已**完全重构**，网络会自动从你第二阶段跑完的 `deepsdf/experiments/.../LatentCodes` 中提取生成合并而成的宏观隐式表面权重，**无需手动再跑重构提取！** 
+> **关于 Latent Codes 真值（Ground Truth）的重要说明：**
+> 对于 **训练集 (`train split`)**，现在的 `train.py` / Dataset 已支持直接读取第二阶段 DeepSDF 训练生成的 `deepsdf/experiments/.../LatentCodes/<checkpoint>.pth` 作为监督真值，因此**训练 Encoder 时通常不需要手动先跑一遍 `reconstruct_deep_sdf.py`**。
+>
+> 但对于 **验证集 / 测试集 (`val` / `test` split)**，DeepSDF 默认**不会**在 `LatentCodes` 中直接提供对应样本的真值 Latent Code；如果你希望在 Encoder 训练期间严格计算 `Mean Validation Latent MSE`，则必须先额外对该 split 跑一遍 `reconstruct_deep_sdf.py`，为其生成 `Reconstructions/<checkpoint>/Codes/complete/*.pth` 形式的逐样本 Latent 真值。否则训练会正常进行，但验证阶段会提示 `Validation Latent MSE skipped` / `NaN`。
 
 **1. 编写配置文件**
 在 `./configs/` 下新建一份 `strawberry.json`，核心设置一定要将 `"encoder"` 指定为点云网络：
@@ -104,6 +106,16 @@ python train.py \
     --checkpoint_decoder 500
 ```
 在这里点云编码器（Encoder）会接收点云，预测出一组 Latent Code，并直接与 DeepSDF 训练阶段生成的真实 Latent Code 比较误差来更新自身权重。
+
+**3. 如果需要验证集 Latent MSE，先为 `val split` 生成真值 Latent Code**
+```bash
+python reconstruct_deep_sdf.py \
+    --experiment ./deepsdf/experiments/20260312_dataset \
+    --data ./data/20260312_dataset \
+    --checkpoint_decoder 500 \
+    --split ./deepsdf/experiments/splits/20260312_dataset_val.json
+```
+该命令会将验证集样本的优化后 Latent Code 保存到 `deepsdf/experiments/20260312_dataset/Reconstructions/500/Codes/complete/`。完成后再次运行 `train.py`，验证阶段才会真正输出 `Mean Validation Latent MSE`，而不是 `NaN`。
 
 ---
 

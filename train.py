@@ -57,7 +57,27 @@ def decode_sdf_in_chunks(decoder, latent_batch, grid_batch, latent_size, chunk_s
     return torch.stack(pred_sdf, dim=0)
 
 
-def main_function(decoder, pretrain, cfg, latent_size, trunc_val, overfit, update_decoder):
+def resolve_supervision_path(experiment_directory, checkpoint, split, allow_matrix):
+    matrix_path = os.path.join(experiment_directory, ws.latent_codes_subdir, checkpoint + ".pth")
+    codes_root = os.path.join(experiment_directory, "Reconstructions", checkpoint, "Codes")
+
+    if allow_matrix and os.path.exists(matrix_path):
+        return matrix_path
+
+    candidate_dirs = [
+        os.path.join(codes_root, split),
+        os.path.join(codes_root, "complete"),
+        os.path.join(codes_root, "partial"),
+    ]
+
+    for candidate in candidate_dirs:
+        if os.path.isdir(candidate):
+            return candidate
+
+    return None
+
+
+def main_function(decoder, train_pretrain, val_pretrain, cfg, latent_size, trunc_val, overfit, update_decoder):
 
     if DEBUG:
         torch.manual_seed(133)
@@ -120,7 +140,7 @@ def main_function(decoder, pretrain, cfg, latent_size, trunc_val, overfit, updat
         cl_dataset = PointCloudDataset(
             data_source=param["data_dir"],
             pad_size=param["input_size"],
-            pretrain=pretrain,
+            pretrain=train_pretrain,
             split='train',
             use_partial=False,
             supervised_3d=param["supervised_3d"],
@@ -131,7 +151,7 @@ def main_function(decoder, pretrain, cfg, latent_size, trunc_val, overfit, updat
         cl_dataset = MaskedCameraLaserData(data_source=param["data_dir"],
                                             tf=default_tf,
                                             color_tf = color_tf, 
-                                            pretrain=pretrain,
+                                            pretrain=train_pretrain,
                                             pad_size=param["input_size"],
                                             detection_input=param["detection_input"],
                                             normalize_depth=param["normalize_depth"],
@@ -276,30 +296,37 @@ def main_function(decoder, pretrain, cfg, latent_size, trunc_val, overfit, updat
             with torch.no_grad():
                 val_tfs = [Pad(size=param["input_size"])]
                 val_tf = v2.Compose(val_tfs)
+                val_supervised = param["supervised_3d"] and val_pretrain is not None
+
+                if param["supervised_3d"] and not val_supervised:
+                    print(
+                        "\n[Warning] Validation latent supervision is unavailable for split 'val'. "
+                        "Skipping validation MSE because no val latent-code source was found."
+                    )
 
                 if param['encoder'] in ['point_cloud', 'point_cloud_large', 'foldnet', 'pointnext']:
                     val_cl_dataset = PointCloudDataset(
                         data_source=param["data_dir"],
                         pad_size=param["input_size"],
-                        pretrain=pretrain,
+                        pretrain=val_pretrain,
                         split='val',
                         use_partial=False,
-                        supervised_3d=param["supervised_3d"],
-                        sdf_loss=param["3D_loss"],
+                        supervised_3d=val_supervised,
+                        sdf_loss=False,
                         grid_density=param["grid_density"],
                     )
                 else:
                     val_cl_dataset = MaskedCameraLaserData(data_source=param["data_dir"],
                                                             tf=val_tf,
                                                             color_tf = None, 
-                                                            pretrain=pretrain,
+                                                            pretrain=val_pretrain,
                                                             pad_size=param["input_size"],
                                                             detection_input=param["detection_input"],
                                                             normalize_depth=param["normalize_depth"],
                                                             depth_min=param["depth_min"],
                                                             depth_max=param["depth_max"],
-                                                            supervised_3d=param["supervised_3d"],
-                                                            sdf_loss=param["3D_loss"],
+                                                            supervised_3d=val_supervised,
+                                                            sdf_loss=False,
                                                             grid_density=param["grid_density"],
                                                             split='val',
                                                             overfit=overfit,
@@ -310,34 +337,47 @@ def main_function(decoder, pretrain, cfg, latent_size, trunc_val, overfit, updat
 
                 val_losses = []
                 print('\nvalidation...')
-                for _, item in enumerate(tqdm(iter(val_dataset))):
-                    try:
-                        if param['encoder'] not in ['point_cloud', 'point_cloud_large', 'foldnet', 'pointnext']:
-                            encoder_input = torch.cat((item['rgb'], item['depth']), 1).to(device)
-                        else:
-                            encoder_input = item['partial_pcd'].permute(0, 2, 1).to(device)
+                if val_supervised:
+                    for sample_idx, item in enumerate(tqdm(iter(val_dataset))):
+                        try:
+                            if param['encoder'] not in ['point_cloud', 'point_cloud_large', 'foldnet', 'pointnext']:
+                                encoder_input = torch.cat((item['rgb'], item['depth']), 1).to(device)
+                            else:
+                                encoder_input = item['partial_pcd'].permute(0, 2, 1).to(device)
 
-                        # encoding
-                        latent_val = encoder(encoder_input)
-                        
-                        target_latent = item['latent'].to(device)
-                        mse = torch.nn.functional.mse_loss(latent_val.squeeze(), target_latent.squeeze())
-                        val_losses.append(mse.item())
+                            # encoding
+                            latent_val = encoder(encoder_input)
 
-                        if args.overfit: break                        
-                    except Exception as e:
-                        pass
+                            target_latent = item['latent'].to(device)
+                            mse = torch.nn.functional.mse_loss(latent_val.squeeze(), target_latent.squeeze())
+                            val_losses.append(mse.item())
+
+                            if args.overfit:
+                                break
+                        except Exception as e:
+                            sample_name = item.get('fruit_id', ['unknown'])
+                            if isinstance(sample_name, (list, tuple)):
+                                sample_name = sample_name[0]
+                            print(f"[Warning] Validation sample {sample_idx} ({sample_name}) failed: {e}")
 
                 if len(val_losses) > 0:
                     rmse_volume = sum(val_losses) / len(val_losses)
                 else:
-                    rmse_volume = float('inf')
-                print('Mean Validation Latent MSE: ', round(rmse_volume, 5))
+                    rmse_volume = float('nan')
+                    if val_supervised:
+                        print("[Warning] No validation samples produced a valid latent MSE. Recording NaN.")
+                    else:
+                        print("[Info] Validation Latent MSE skipped for this run.")
+
+                if np.isfinite(rmse_volume):
+                    print('Mean Validation Latent MSE: ', round(rmse_volume, 5))
+                else:
+                    print('Mean Validation Latent MSE: NaN')
 
             # logging
             writer.add_scalar('Val/rmse_volume', rmse_volume, n_iter)
             # saving best model
-            if rmse_volume < last_rmse:
+            if np.isfinite(rmse_volume) and rmse_volume < last_rmse:
                 last_rmse = rmse_volume
                 save_model(encoder, decoder, e, optim, loss, param["checkpoint_dir"]+'_'+cfg_fname+'_best_model.pt')
                 print('saving best model')
@@ -411,23 +451,16 @@ if __name__ == "__main__":
     decoder.load_state_dict(model_state)
     decoder = net_utils.set_require_grad(decoder, True)
 
-    # 优先加载 DeepSDF 各 Epoch 训练时同步生成的全局 Latent 矩阵真值 (跳过单独解构环节)
-    pretrain_matrix = os.path.join(args.experiment_directory, ws.latent_codes_subdir, args.checkpoint + ".pth")
-    # 向下兼容使用 reconstruct 脚本抽取的独立部分结果
-    pretrain_path_partial = os.path.join(args.experiment_directory, 'Reconstructions', args.checkpoint, 'Codes', 'partial')
-    pretrain_path_complete = os.path.join(args.experiment_directory, 'Reconstructions', args.checkpoint, 'Codes', 'complete')
-    
-    if os.path.exists(pretrain_matrix):
-        pretrain_path = pretrain_matrix
-    elif os.path.exists(pretrain_path_partial):
-        pretrain_path = pretrain_path_partial
-    elif os.path.exists(pretrain_path_complete):
-        pretrain_path = pretrain_path_complete
-    else:
-        pretrain_path = pretrain_matrix # fallback to matrix
+    train_pretrain_path = resolve_supervision_path(
+        args.experiment_directory, args.checkpoint, split="train", allow_matrix=True
+    )
+    val_pretrain_path = resolve_supervision_path(
+        args.experiment_directory, args.checkpoint, split="val", allow_matrix=False
+    )
 
     main_function(decoder=decoder,
-                  pretrain=pretrain_path,
+                  train_pretrain=train_pretrain_path,
+                  val_pretrain=val_pretrain_path,
                   cfg=args.cfg,
                   latent_size=latent_size,
                   trunc_val=specs['ClampingDistance'],
