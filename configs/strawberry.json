@@ -18,7 +18,7 @@
     "depth_min": 230,
     "depth_max": 350,
     "_comment_batch_size": "小批量训练的 Batch 大小",
-    "batch_size": 12,
+    "batch_size": 1,
     "_comment_input_size": "输入 DataLoader 的点云采样数量(即降采样/补全后的固定点数)",
     "input_size": 2048,
     "_comment_epoch": "网络训练的总轮数",
@@ -44,11 +44,11 @@
     "contrastive": false,
     "rendering": false,
     "reg_latent": false,
-    "3D_loss": false,
+    "3D_loss": true,
     "_comment_threshold": "验证阶段计算匹配距离(如Chamfer Distance)的一些内置阈值",
     "threshold": 0.0007,
     "_comment_grid_density": "SDF渲染时使用的网格分辨率基准",
-    "grid_density": 128,
+    "grid_density": 24,
     "_comment_normalization_scale": "将网络局部空间还原至物理世界空间的缩放比例(由预处理时决定)，体积对齐以此值为基准。如果是按全数据集计算的统一缩放比则填入对应实数，如果不缩放则填 1.0",
     "normalization_scale": 45.54
 }

@@ -42,6 +42,21 @@ def check_direxcist(dir):
             os.makedirs(dir)  # make new folder
 
 
+def decode_sdf_in_chunks(decoder, latent_batch, grid_batch, latent_size, chunk_size):
+    pred_sdf = []
+    for latent, grid in zip(latent_batch, grid_batch):
+        latent = latent.unsqueeze(0)
+        sample_preds = []
+        num_points = grid.points.size(0)
+        for start_idx in range(0, num_points, chunk_size):
+            end_idx = min(start_idx + chunk_size, num_points)
+            points_chunk = grid.points[start_idx:end_idx]
+            decoder_input = torch.cat([latent.expand(points_chunk.size(0), -1), points_chunk], dim=1)
+            sample_preds.append(decoder(decoder_input))
+        pred_sdf.append(torch.cat(sample_preds, dim=0))
+    return torch.stack(pred_sdf, dim=0)
+
+
 def main_function(decoder, pretrain, cfg, latent_size, trunc_val, overfit, update_decoder):
 
     if DEBUG:
@@ -99,13 +114,18 @@ def main_function(decoder, pretrain, cfg, latent_size, trunc_val, overfit, updat
     default_tfs = [Pad(size=param["input_size"]), geo_tfs]
     default_tf = v2.Compose(default_tfs)
 
+    sdf_chunk_size = int(param.get("sdf_chunk_size", 65536))
+
     if param['encoder'] in ['point_cloud', 'point_cloud_large', 'foldnet', 'pointnext']:
         cl_dataset = PointCloudDataset(
             data_source=param["data_dir"],
             pad_size=param["input_size"],
             pretrain=pretrain,
+            split='train',
             use_partial=False,
-            supervised_3d=param["supervised_3d"]
+            supervised_3d=param["supervised_3d"],
+            sdf_loss=param["3D_loss"],
+            grid_density=param["grid_density"],
         )
     else:
         cl_dataset = MaskedCameraLaserData(data_source=param["data_dir"],
@@ -221,14 +241,13 @@ def main_function(decoder, pretrain, cfg, latent_size, trunc_val, overfit, updat
                 for _ in range(current_batch_size):
                     grid_batch.append(Grid3D(grid_density, device, precision, bbox=box))
 
-                deepsdf_input = torch.zeros((current_batch_size, grid_density**3, latent_size+3))
-                for batch_idx, (latent, grid) in enumerate(zip(latent_batch, grid_batch)):
-                    deepsdf_input[batch_idx] = torch.cat([latent.expand(grid.points.size(0), -1), grid.points], dim=1)
-
-                deepsdf_input = deepsdf_input.to(device, latent.dtype)
-
-                # decoding
-                pred_sdf = decoder(deepsdf_input)
+                pred_sdf = decode_sdf_in_chunks(
+                    decoder,
+                    latent_batch,
+                    grid_batch,
+                    latent_size,
+                    sdf_chunk_size,
+                )
 
                 if param.get('loss_type', 'original') == 'weighted':
                     loss_sdf = SDFLoss_new(pred_sdf, item['target_sdf'].to(device), item['target_sdf_weights'].to(device), sdf_trunc=cl_dataset.sdf_trunc, points=grid_batch, alpha=param.get('sdf_alpha', 15.0))
@@ -263,8 +282,11 @@ def main_function(decoder, pretrain, cfg, latent_size, trunc_val, overfit, updat
                         data_source=param["data_dir"],
                         pad_size=param["input_size"],
                         pretrain=pretrain,
+                        split='val',
                         use_partial=False,
-                        supervised_3d=param["supervised_3d"]
+                        supervised_3d=param["supervised_3d"],
+                        sdf_loss=param["3D_loss"],
+                        grid_density=param["grid_density"],
                     )
                 else:
                     val_cl_dataset = MaskedCameraLaserData(data_source=param["data_dir"],
