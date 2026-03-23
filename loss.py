@@ -75,7 +75,6 @@ def SDFLoss(pred, target, target_weights, sdf_trunc, points):
     pred = pred[narrow_band]
 
     pred /= sdf_trunc # normalized sdf predd
-    
     pred = log_transform(pred)
     target = log_transform(target)
     
@@ -84,6 +83,28 @@ def SDFLoss(pred, target, target_weights, sdf_trunc, points):
 
 def log_transform(sdf):
         return sdf.sign() * (sdf.abs() + 1.0).log()
+
+def SDFLoss_new(pred, target, target_weights, sdf_trunc, points, alpha=15.0):
+
+    pred = torch.clamp(pred, min=-sdf_trunc, max=sdf_trunc)
+
+    target = target[target_weights !=0 ]
+    pred = pred[target_weights !=0 ]
+
+    narrow_band = target.abs() < 1
+    target = target[narrow_band]
+    pred = pred[narrow_band]
+
+    pred /= sdf_trunc # normalized sdf predd
+    
+    pred_sdf_log = log_transform(pred)
+    target_sdf_log = log_transform(target)
+    
+    weights = torch.exp(-alpha * torch.abs(target))
+    weights = weights / (weights.sum() + 1e-8) * len(weights)  # 归一化保持量纲
+    
+    loss = (weights * torch.abs(pred_sdf_log - target_sdf_log)).mean()
+    return loss
 
 def RegLatentLoss(batch_vecs, code_reg_lambda, epoch):
     loss = torch.abs(1 - torch.norm(batch_vecs, dim=1)).mean()

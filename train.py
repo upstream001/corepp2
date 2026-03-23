@@ -24,7 +24,7 @@ from dataloaders.transforms import Pad, Rotate, RandomHorizontalFlip, RandomVert
 from networks.models import Encoder, EncoderBig, ERFNetEncoder, EncoderBigPooled, EncoderPooled, DoubleEncoder, PointCloudEncoder, PointCloudEncoderLarge, FoldNetEncoder
 import networks.utils as net_utils
 from networks.pointnext import PointNeXtEncoder, build_pointnext_encoder
-from loss import KLDivLoss, SuperLoss, SDFLoss, RegLatentLoss, AttRepLoss
+from loss import KLDivLoss, SuperLoss, SDFLoss, SDFLoss_new, RegLatentLoss, AttRepLoss
 from utils import sdf2mesh_cuda, save_model, tensor_dict_2_float_dict
 
 DEBUG = True
@@ -230,7 +230,10 @@ def main_function(decoder, pretrain, cfg, latent_size, trunc_val, overfit, updat
                 # decoding
                 pred_sdf = decoder(deepsdf_input)
 
-                loss_sdf = SDFLoss(pred_sdf, item['target_sdf'].to(device), item['target_sdf_weights'].to(device), sdf_trunc=cl_dataset.sdf_trunc, points=grid_batch)
+                if param.get('loss_type', 'original') == 'weighted':
+                    loss_sdf = SDFLoss_new(pred_sdf, item['target_sdf'].to(device), item['target_sdf_weights'].to(device), sdf_trunc=cl_dataset.sdf_trunc, points=grid_batch, alpha=param.get('sdf_alpha', 15.0))
+                else:
+                    loss_sdf = SDFLoss(pred_sdf, item['target_sdf'].to(device), item['target_sdf_weights'].to(device), sdf_trunc=cl_dataset.sdf_trunc, points=grid_batch)
                 loss += param['lambda_sdf']*loss_sdf
 
                 # logging
