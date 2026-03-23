@@ -18,7 +18,7 @@
     "depth_min": 230,
     "depth_max": 350,
     "_comment_batch_size": "小批量训练的 Batch 大小",
-    "batch_size": 4,
+    "batch_size": 12,
     "_comment_input_size": "输入 DataLoader 的点云采样数量(即降采样/补全后的固定点数)",
     "input_size": 2048,
     "_comment_epoch": "网络训练的总轮数",
