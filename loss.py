@@ -110,3 +110,16 @@ def RegLatentLoss(batch_vecs, code_reg_lambda, epoch):
     loss = torch.abs(1 - torch.norm(batch_vecs, dim=1)).mean()
     loss *= code_reg_lambda
     return loss
+
+
+def LatentSpreadLoss(pred, gt, eps=1e-6):
+    pred_std = torch.sqrt(torch.var(pred, dim=0, unbiased=False) + eps)
+    gt_std = torch.sqrt(torch.var(gt.detach(), dim=0, unbiased=False) + eps)
+    return nn.MSELoss()(pred_std, gt_std)
+
+
+def VolumeLoss(pred_volume, target_volume, log_target=True):
+    target = target_volume.float().view_as(pred_volume)
+    if log_target:
+        target = torch.log1p(target)
+    return nn.SmoothL1Loss()(pred_volume, target)

@@ -69,3 +69,10 @@
 62. 在 `architecture.md` 中补充了 PointNeXt 编码器的详细参数说明。通过查阅 `networks/pointnext.py` 和实验配置文件，明确并记录了该模型的核心配置：包括 KNN 搜索中使用的 k 值 (nsample=24)、宽度通道数 (width=48，介于标准 S 型和 B 型之间)、以及两层 Set Abstraction (SA) 层分别对应的采样点数 (512 和 128)。同时新增了完整的网络结构参数表，详细描述了从输入点云到最终潜变量输出的每一层通道变化与计算细节，为后续的模型维护与论文方法描述提供了准确参考。
 63. 修改了 `data_preparation/make_strawberry_splits.py` 的数据集切分策略：原先脚本虽然名义上按 `8:1:1` 划分，但实际上是在文件名排序后直接顺序切片，导致验证集和测试集总是落在“最后 20%”样本上。现已改为在切分前基于可配置随机种子（默认 `42`）对实例列表进行打乱，再执行可复现的随机划分；同时补充了 `--seed` 命令行参数与比例合法性校验，并同步更新了 `workflow_new.md` 中对应的数据准备说明与命令示例。
 64. 在 `loss.py` 中新增了 `SDFLoss_new` 函数，实现了基于表面距离加权的 SDF 损失逻辑（通过 `alpha` 超参数强化近表面权重），并保留了原有的 `SDFLoss` 作为默认 L1 损失。同时重构了 `train.py` 的损失计算部分，使其能根据配置文件（如 `strawberry.json`）中的 `loss_type` 项在 `original` 与 `weighted` 模式间灵活切换，并配套加入了 `sdf_alpha` 配置入口。
+
+65. 针对加入 `3D_loss` 后草莓重建体积仍然集中在约 `17 mL`、无法随真实大小明显变化的问题，完成了一次系统性的 **latent collapse 排查与修复**。首先在 `conda` 的 `corepp` 环境中对 `20260312_dataset` 的 `val split` 做了对齐分析，确认 Encoder 预测 latent 的平均每维方差仅为真值 latent 的 `0.0121%`，并将这一结论与完整统计结果记录到 `problem.md`。随后在训练链路中加入了两类针对性约束：
+- 在 `loss.py` 中新增 `LatentSpreadLoss`，按 batch 对齐预测 latent 与真值 latent 的逐维标准差，直接抑制 Encoder 输出塌缩到均值附近；
+- 在 `loss.py` 中新增 `VolumeLoss`，并在 `train.py` 中为 Encoder latent 接入一个轻量 `volume_head`，直接回归 `log1p(volume_ml)`，让训练目标首次显式包含体积信息，而不再只是依赖 latent MSE 与 SDF 几何间接学习尺寸；
+- 在 `dataloaders/pointcloud_dataset.py` 中打通 `mapping.json + ground_truth.csv` 的真实体积标签读取，将 `volume_ml` 随样本一起返回；
+- 在 `utils.py` 的 `save_model` 中补充 `volume_head_state_dict` 保存，保证后续 checkpoint 可以完整携带这一路新增监督分支；
+- 在 `configs/strawberry.json` 中加入 `lambda_volume` 与 `lambda_latent_spread` 两个权重入口，便于后续继续调参抑制体积塌缩。

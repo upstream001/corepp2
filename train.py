@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import torch
+import torch.nn as nn
 from torch.utils.data import DataLoader
 import numpy as np
 import random
@@ -24,7 +25,7 @@ from dataloaders.transforms import Pad, Rotate, RandomHorizontalFlip, RandomVert
 from networks.models import Encoder, EncoderBig, ERFNetEncoder, EncoderBigPooled, EncoderPooled, DoubleEncoder, PointCloudEncoder, PointCloudEncoderLarge, FoldNetEncoder
 import networks.utils as net_utils
 from networks.pointnext import PointNeXtEncoder, build_pointnext_encoder
-from loss import KLDivLoss, SuperLoss, SDFLoss, SDFLoss_new, RegLatentLoss, AttRepLoss
+from loss import KLDivLoss, SuperLoss, SDFLoss, SDFLoss_new, RegLatentLoss, AttRepLoss, LatentSpreadLoss, VolumeLoss
 from utils import sdf2mesh_cuda, save_model, tensor_dict_2_float_dict
 
 DEBUG = True
@@ -91,8 +92,10 @@ def main_function(decoder, train_pretrain, val_pretrain, cfg, latent_size, trunc
 
     check_direxcist(param["checkpoint_dir"])
     device = 'cuda'
+    lambda_latent_spread = float(param.get("lambda_latent_spread", 0.5))
+    lambda_volume = float(param.get("lambda_volume", 0.1))
     shuffle = True
-    last_rmse = np.inf
+    last_val_score = np.inf
 
     # creating variables for 3d grid for diff SDF renderer
     grid_density = param['grid_density']
@@ -119,6 +122,12 @@ def main_function(decoder, train_pretrain, val_pretrain, cfg, latent_size, trunc
         encoder = build_pointnext_encoder(out_channels=latent_size, cfg=param).to(device)
     else:
         encoder = Encoder(in_channels=4, out_channels=latent_size, size=param["input_size"]).to(device)
+
+    volume_head = nn.Sequential(
+        nn.Linear(latent_size, latent_size),
+        nn.ReLU(inplace=True),
+        nn.Linear(latent_size, 1),
+    ).to(device)
 
     #############################
     # TRAINING LOOP STARTS HERE #
@@ -167,15 +176,16 @@ def main_function(decoder, train_pretrain, val_pretrain, cfg, latent_size, trunc
     dataset = DataLoader(cl_dataset, batch_size=param["batch_size"], shuffle=shuffle, drop_last=True)
 
     if update_decoder:
-        params = list(encoder.parameters()) + list(decoder.parameters())   
+        params = list(encoder.parameters()) + list(volume_head.parameters()) + list(decoder.parameters())
     else:
-        params = list(encoder.parameters()) #+ list(decoder.parameters())
+        params = list(encoder.parameters()) + list(volume_head.parameters())
     
     optim = torch.optim.Adam(params, lr=param["lr"], weight_decay=1e-6)
     scheduler = torch.optim.lr_scheduler.ExponentialLR(optim, gamma=0.97)
 
     print('\ncfg: ', json.dumps(param, indent=4), '\n')
     print(encoder)
+    print(volume_head)
     print(decoder)
 
     # import ipdb; ipdb.set_trace()
@@ -201,6 +211,7 @@ def main_function(decoder, train_pretrain, val_pretrain, cfg, latent_size, trunc
             norms_batch = torch.linalg.norm(latent_batch_unnormd, dim=1)
 
             latent_batch = latent_batch_unnormd #/ norms_batch.unsqueeze(dim=1)
+            pred_volume = volume_head(latent_batch)
 
             if param["contrastive"]:
                 fruit_ids = [list(dataset.dataset.Ks.keys()).index(fid) for fid in item['fruit_id']]
@@ -232,6 +243,18 @@ def main_function(decoder, train_pretrain, val_pretrain, cfg, latent_size, trunc
                 # logging
                 writer.add_scalar('Loss/Train/SuperLoss', loss_super, n_iter)
                 logging_string += ' -- loss super: {}'.format(loss_super.item())
+
+                if lambda_latent_spread > 0 and latent_batch.shape[0] > 1:
+                    loss_spread = LatentSpreadLoss(latent_batch, item['latent'].to(device))
+                    loss += lambda_latent_spread * loss_spread
+                    writer.add_scalar('Loss/Train/LatentSpreadLoss', lambda_latent_spread * loss_spread, n_iter)
+                    logging_string += ' -- loss spread: {}'.format((lambda_latent_spread * loss_spread).item())
+
+            if lambda_volume > 0 and 'volume_ml' in item:
+                loss_volume = VolumeLoss(pred_volume, item['volume_ml'].to(device).view(-1, 1))
+                loss += lambda_volume * loss_volume
+                writer.add_scalar('Loss/Train/VolumeLoss', lambda_volume * loss_volume, n_iter)
+                logging_string += ' -- loss volume: {}'.format((lambda_volume * loss_volume).item())
             
             if param['reg_latent']:
                 loss_reg = RegLatentLoss(latent_batch, param["lambda_reg_latent"], e)
@@ -336,6 +359,7 @@ def main_function(decoder, train_pretrain, val_pretrain, cfg, latent_size, trunc
                 val_dataset = DataLoader(val_cl_dataset, batch_size=1, shuffle=False)
 
                 val_losses = []
+                val_volume_losses = []
                 print('\nvalidation...')
                 if val_supervised:
                     for sample_idx, item in enumerate(tqdm(iter(val_dataset))):
@@ -345,12 +369,16 @@ def main_function(decoder, train_pretrain, val_pretrain, cfg, latent_size, trunc
                             else:
                                 encoder_input = item['partial_pcd'].permute(0, 2, 1).to(device)
 
-                            # encoding
                             latent_val = encoder(encoder_input)
+                            pred_volume_val = volume_head(latent_val)
 
                             target_latent = item['latent'].to(device)
                             mse = torch.nn.functional.mse_loss(latent_val.squeeze(), target_latent.squeeze())
                             val_losses.append(mse.item())
+
+                            if lambda_volume > 0 and 'volume_ml' in item:
+                                vol_loss = VolumeLoss(pred_volume_val, item['volume_ml'].to(device).view(-1, 1))
+                                val_volume_losses.append(vol_loss.item())
 
                             if args.overfit:
                                 break
@@ -369,26 +397,45 @@ def main_function(decoder, train_pretrain, val_pretrain, cfg, latent_size, trunc
                     else:
                         print("[Info] Validation Latent MSE skipped for this run.")
 
+                if len(val_volume_losses) > 0:
+                    val_volume_loss = sum(val_volume_losses) / len(val_volume_losses)
+                else:
+                    val_volume_loss = float('nan')
+
                 if np.isfinite(rmse_volume):
                     print('Mean Validation Latent MSE: ', round(rmse_volume, 5))
                 else:
                     print('Mean Validation Latent MSE: NaN')
 
+                if np.isfinite(val_volume_loss):
+                    print('Mean Validation Volume Loss: ', round(val_volume_loss, 5))
+                else:
+                    print('Mean Validation Volume Loss: NaN')
+
+                if np.isfinite(rmse_volume) and np.isfinite(val_volume_loss):
+                    val_score = rmse_volume + lambda_volume * val_volume_loss
+                else:
+                    val_score = rmse_volume
+
             # logging
             writer.add_scalar('Val/rmse_volume', rmse_volume, n_iter)
+            if np.isfinite(val_volume_loss):
+                writer.add_scalar('Val/volume_loss', val_volume_loss, n_iter)
+            if np.isfinite(val_score):
+                writer.add_scalar('Val/score', val_score, n_iter)
             # saving best model
-            if np.isfinite(rmse_volume) and rmse_volume < last_rmse:
-                last_rmse = rmse_volume
-                save_model(encoder, decoder, e, optim, loss, param["checkpoint_dir"]+'_'+cfg_fname+'_best_model.pt')
+            if np.isfinite(val_score) and val_score < last_val_score:
+                last_val_score = val_score
+                save_model(encoder, decoder, e, optim, loss, param["checkpoint_dir"]+'_'+cfg_fname+'_best_model.pt', volume_head=volume_head)
                 print('saving best model')
             print()
 
         # saving checkpoints
         if (e+1) % param["checkpoint_frequency"] == 0:
-            save_model(encoder, decoder, e, optim, loss,  param["checkpoint_dir"]+'_'+cfg_fname+'_checkpoint.pt')
+            save_model(encoder, decoder, e, optim, loss,  param["checkpoint_dir"]+'_'+cfg_fname+'_checkpoint.pt', volume_head=volume_head)
 
     # saving last model
-    save_model(encoder, decoder, e, optim, loss,  param["checkpoint_dir"]+'_'+cfg_fname+'_final_model.pt')
+    save_model(encoder, decoder, e, optim, loss,  param["checkpoint_dir"]+'_'+cfg_fname+'_final_model.pt', volume_head=volume_head)
 
     return
 

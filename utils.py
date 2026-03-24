@@ -8,14 +8,17 @@ import torch.utils.dlpack
 from skimage import measure
 import torch
 
-def save_model(encoder, decoder, epoch, optim, loss, name):
-    torch.save({
+def save_model(encoder, decoder, epoch, optim, loss, name, volume_head=None):
+    save_dict = {
         'epoch': epoch,
         'encoder_state_dict': encoder.state_dict(),
         'decoder_state_dict': decoder.state_dict(),
         'optimizer_state_dict': optim.state_dict(),
         'loss': loss,
-        }, name)
+    }
+    if volume_head is not None:
+        save_dict['volume_head_state_dict'] = volume_head.state_dict()
+    torch.save(save_dict, name)
 
 def tensor_dict_2_float_dict(tensor_dict):
     for k, v in tensor_dict.items():

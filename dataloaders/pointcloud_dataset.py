@@ -1,3 +1,5 @@
+import csv
+import json
 import os
 import random
 
@@ -46,6 +48,7 @@ class PointCloudDataset(torch.utils.data.Dataset):
         self.grid_density = int(grid_density)
         self.sdf_trunc = float(sdf_trunc)
         self._sdf_cache = {}
+        self.volume_lookup = self._load_volume_lookup()
 
         if self.supervised_3d and pretrain is not None:
             self.latents_dict = self.get_latents_dict(pretrain)
@@ -53,6 +56,41 @@ class PointCloudDataset(torch.utils.data.Dataset):
             self.latents_dict = {}
 
         self.files = self.get_instance_filenames()
+
+    def _load_volume_lookup(self):
+        mapping_path = os.path.join(self.data_source, "mapping.json")
+        if not os.path.exists(mapping_path):
+            return {}
+
+        repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        gt_csv_path = os.path.join(repo_root, "ground_truth.csv")
+        if not os.path.exists(gt_csv_path):
+            return {}
+
+        gt_volumes = {}
+        with open(gt_csv_path, "r", encoding="utf-8") as f:
+            for row in csv.DictReader(f):
+                filename = (row.get("filename") or "").strip()
+                volume_ml = (row.get("volume_ml") or "").strip()
+                if not filename or not volume_ml:
+                    continue
+                try:
+                    gt_volumes[filename] = float(volume_ml)
+                except ValueError:
+                    continue
+
+        with open(mapping_path, "r", encoding="utf-8") as f:
+            mapping = json.load(f)
+
+        volume_lookup = {}
+        for partial_name, complete_name in mapping.items():
+            if complete_name not in gt_volumes:
+                continue
+            volume_ml = gt_volumes[complete_name]
+            volume_lookup[partial_name] = volume_ml
+            volume_lookup[os.path.splitext(partial_name)[0]] = volume_ml
+
+        return volume_lookup
 
     def get_latents_dict(self, path):
         latent_dictionary = {}
@@ -115,8 +153,6 @@ class PointCloudDataset(torch.utils.data.Dataset):
         return latent_dictionary
 
     def get_instance_filenames(self):
-        import json
-
         subfolder = "partial" if self.use_partial else "complete"
         pcd_dir = os.path.join(self.data_source, subfolder)
 
@@ -291,6 +327,10 @@ class PointCloudDataset(torch.utils.data.Dataset):
         item["rgb"] = torch.zeros((3, self.pad_size, self.pad_size))
         item["depth"] = torch.zeros((1, self.pad_size, self.pad_size))
         item["mask"] = torch.zeros((1, self.pad_size, self.pad_size))
+
+        volume_ml = self.volume_lookup.get(fruit_id)
+        if volume_ml is not None:
+            item["volume_ml"] = torch.tensor(volume_ml, dtype=torch.float32)
 
         if self.supervised_3d:
             trained_latent = self.latents_dict[fruit_id]

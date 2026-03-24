@@ -243,6 +243,7 @@ def main_function(decoder, pretrain, cfg, latent_size, test_data_dir=None):
                 'frame_id',
                 'complete_volume_ml',
                 'mesh_volume_ml',
+                'pred_volume_head_ml',
                 'chamfer_distance',
                 'precision',
                 'recall',
@@ -308,6 +309,12 @@ def main_function(decoder, pretrain, cfg, latent_size, test_data_dir=None):
     else:
         encoder = Encoder(in_channels=4, out_channels=latent_size, size=param["input_size"]).to(device)
 
+    volume_head = nn.Sequential(
+        nn.Linear(latent_size, latent_size),
+        nn.ReLU(inplace=True),
+        nn.Linear(latent_size, 1),
+    ).to(device)
+
     ckpt = os.path.join(param['checkpoint_dir'], param['checkpoint_file'])
     ckpt_data = torch.load(ckpt)
     if 'encoder_state_dict' in ckpt_data:
@@ -316,11 +323,15 @@ def main_function(decoder, pretrain, cfg, latent_size, test_data_dir=None):
         encoder.load_state_dict(ckpt_data)
     if 'decoder_state_dict' in ckpt_data:
         decoder.load_state_dict(ckpt_data['decoder_state_dict'])
+    if 'volume_head_state_dict' in ckpt_data:
+        volume_head.load_state_dict(ckpt_data['volume_head_state_dict'])
     ##############################
     #  TESTING LOOP STARTS HERE  #
     ##############################
 
     decoder.to(device)
+    volume_head.to(device)
+    volume_head.eval()
 
     # transformations
     tfs = [Pad(size=param["input_size"])]
@@ -384,6 +395,7 @@ def main_function(decoder, pretrain, cfg, latent_size, test_data_dir=None):
                 encoder_input = item['partial_pcd'].permute(0, 2, 1).to(device) ## be aware: the current partial pcd is not registered to the target pcd!
 
             latent = encoder(encoder_input)
+            pred_volume_head_ml = torch.expm1(volume_head(latent)).item()
 
             # save the latent vector for further inspection
             latent_save = latent.detach().to('cpu').squeeze()
@@ -445,6 +457,7 @@ def main_function(decoder, pretrain, cfg, latent_size, test_data_dir=None):
                     'frame_id': frame_id,
                     'complete_volume_ml': round(complete_volume_ml, 6) if complete_volume_ml is not None else np.nan,
                     'mesh_volume_ml': round(volume_ml, 6),
+                    'pred_volume_head_ml': round(pred_volume_head_ml, 6),
                     'chamfer_distance': 0.0,
                     'precision': 0.0,
                     'recall': 0.0,
@@ -498,6 +511,7 @@ def main_function(decoder, pretrain, cfg, latent_size, test_data_dir=None):
                 'frame_id': frame_id,
                 'complete_volume_ml': round(complete_volume_ml, 6) if complete_volume_ml is not None else np.nan,
                 'mesh_volume_ml': round(volume_ml, 6),
+                'pred_volume_head_ml': round(pred_volume_head_ml, 6),
                 'chamfer_distance': round(chamfer_dist_value, 6),
                 'precision': round(prec, 1),
                 'recall': round(rec, 1),
