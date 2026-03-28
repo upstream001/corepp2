@@ -48,11 +48,15 @@
     "_comment_threshold": "验证阶段计算匹配距离(如Chamfer Distance)的一些内置阈值",
     "threshold": 0.0007,
     "_comment_grid_density": "SDF渲染时使用的网格分辨率基准 128",
-    "grid_density": 64,
+    "grid_density": 24,
     "_comment_normalization_scale": "将网络局部空间还原至物理世界空间的缩放比例(由预处理时决定)，体积对齐以此值为基准。如果是按全数据集计算的统一缩放比则填入对应实数，如果不缩放则填 1.0",
     "normalization_scale": 45.54,
-    "_comment_lambda_volume": "体积监督损失权重，用于直接约束预测体积不要塌缩到均值附近",
-    "lambda_volume": 0.1,
-    "_comment_lambda_latent_spread": "潜变量分布展开损失权重，用于抑制 encoder 输出 latent collapse",
-    "lambda_latent_spread": 0.5
+    "_comment_lambda_volume": "体积监督损失权重，用于直接约束预测体积不要塌缩到均值附近；重训时提高到更强。",
+    "lambda_volume": 0.5,
+    "_comment_lambda_latent_spread": "潜变量分布展开损失权重，用于抑制 encoder 输出 latent collapse；重训时提高到更强。",
+    "lambda_latent_spread": 1.0,
+    "_comment_calibrate_volume_head_on_val": "测试时是否使用验证集对 volume head 做线性校准，以提升直接体积预测精度",
+    "calibrate_volume_head_on_val": true,
+    "_comment_lambda_super": "Latent MSE 主监督权重。为避免继续把预测 latent 拉回均值附近，这里显式下调。",
+    "lambda_super": 0.3
 }

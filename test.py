@@ -242,8 +242,9 @@ def main_function(decoder, pretrain, cfg, latent_size, test_data_dir=None):
     columns = ['fruit_id',
                 'frame_id',
                 'complete_volume_ml',
-                'mesh_volume_ml',
                 'pred_volume_head_ml',
+                'pred_volume_head_raw_ml',
+                'mesh_volume_ml',
                 'chamfer_distance',
                 'precision',
                 'recall',
@@ -323,7 +324,8 @@ def main_function(decoder, pretrain, cfg, latent_size, test_data_dir=None):
         encoder.load_state_dict(ckpt_data)
     if 'decoder_state_dict' in ckpt_data:
         decoder.load_state_dict(ckpt_data['decoder_state_dict'])
-    if 'volume_head_state_dict' in ckpt_data:
+    volume_head_enabled = 'volume_head_state_dict' in ckpt_data
+    if volume_head_enabled:
         volume_head.load_state_dict(ckpt_data['volume_head_state_dict'])
     ##############################
     #  TESTING LOOP STARTS HERE  #
@@ -332,6 +334,10 @@ def main_function(decoder, pretrain, cfg, latent_size, test_data_dir=None):
     decoder.to(device)
     volume_head.to(device)
     volume_head.eval()
+
+    volume_head_scale = 1.0
+    volume_head_bias = 0.0
+    use_volume_head_calibration = bool(param.get('calibrate_volume_head_on_val', True))
 
     # transformations
     tfs = [Pad(size=param["input_size"])]
@@ -370,6 +376,39 @@ def main_function(decoder, pretrain, cfg, latent_size, test_data_dir=None):
                                                 )
     dataset = DataLoader(cl_dataset, batch_size=1, shuffle=False)
 
+    if volume_head_enabled and use_volume_head_calibration and test_data_dir is None and param['encoder'] in ['point_cloud', 'point_cloud_large', 'foldnet', 'pointnext']:
+        cal_dataset = PointCloudDataset(
+            data_source=param["data_dir"],
+            pad_size=param["input_size"],
+            pretrain=pretrain,
+            split='val',
+            use_partial=False,
+            supervised_3d=False,
+            sdf_loss=False,
+            grid_density=param["grid_density"],
+        )
+        cal_loader = DataLoader(cal_dataset, batch_size=1, shuffle=False)
+        cal_preds = []
+        cal_targets = []
+        with torch.no_grad():
+            for item in cal_loader:
+                if 'volume_ml' not in item:
+                    continue
+                encoder_input = item['partial_pcd'].permute(0, 2, 1).to(device)
+                latent = encoder(encoder_input)
+                raw_pred = torch.expm1(volume_head(latent)).item()
+                cal_preds.append(raw_pred)
+                cal_targets.append(float(item['volume_ml'].item()))
+        if len(cal_preds) >= 2:
+            A = np.stack([np.asarray(cal_preds, dtype=np.float64), np.ones(len(cal_preds), dtype=np.float64)], axis=1)
+            y = np.asarray(cal_targets, dtype=np.float64)
+            volume_head_scale, volume_head_bias = np.linalg.lstsq(A, y, rcond=None)[0]
+            volume_head_scale = float(volume_head_scale)
+            volume_head_bias = float(volume_head_bias)
+            print(f"[Info] Volume-head calibration fitted on val split: scale={volume_head_scale:.6f}, bias={volume_head_bias:.6f}")
+        else:
+            print("[Warning] Not enough val samples with volume labels to calibrate volume head.")
+
     with torch.no_grad():
 
         for n_iter, item in enumerate(tqdm(iter(dataset))):
@@ -395,7 +434,12 @@ def main_function(decoder, pretrain, cfg, latent_size, test_data_dir=None):
                 encoder_input = item['partial_pcd'].permute(0, 2, 1).to(device) ## be aware: the current partial pcd is not registered to the target pcd!
 
             latent = encoder(encoder_input)
-            pred_volume_head_ml = torch.expm1(volume_head(latent)).item()
+            if volume_head_enabled:
+                pred_volume_head_raw_ml = torch.expm1(volume_head(latent)).item()
+                pred_volume_head_ml = max(0.0, pred_volume_head_raw_ml * volume_head_scale + volume_head_bias)
+            else:
+                pred_volume_head_raw_ml = float('nan')
+                pred_volume_head_ml = float('nan')
 
             # save the latent vector for further inspection
             latent_save = latent.detach().to('cpu').squeeze()
@@ -456,8 +500,9 @@ def main_function(decoder, pretrain, cfg, latent_size, test_data_dir=None):
                     'fruit_id': item['fruit_id'][0],
                     'frame_id': frame_id,
                     'complete_volume_ml': round(complete_volume_ml, 6) if complete_volume_ml is not None else np.nan,
-                    'mesh_volume_ml': round(volume_ml, 6),
                     'pred_volume_head_ml': round(pred_volume_head_ml, 6),
+                    'pred_volume_head_raw_ml': round(pred_volume_head_raw_ml, 6) if np.isfinite(pred_volume_head_raw_ml) else np.nan,
+                    'mesh_volume_ml': round(volume_ml, 6),
                     'chamfer_distance': 0.0,
                     'precision': 0.0,
                     'recall': 0.0,
@@ -510,8 +555,9 @@ def main_function(decoder, pretrain, cfg, latent_size, test_data_dir=None):
                 'fruit_id': item['fruit_id'][0],
                 'frame_id': frame_id,
                 'complete_volume_ml': round(complete_volume_ml, 6) if complete_volume_ml is not None else np.nan,
-                'mesh_volume_ml': round(volume_ml, 6),
                 'pred_volume_head_ml': round(pred_volume_head_ml, 6),
+                'pred_volume_head_raw_ml': round(pred_volume_head_raw_ml, 6) if np.isfinite(pred_volume_head_raw_ml) else np.nan,
+                'mesh_volume_ml': round(volume_ml, 6),
                 'chamfer_distance': round(chamfer_dist_value, 6),
                 'precision': round(prec, 1),
                 'recall': round(rec, 1),

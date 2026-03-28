@@ -92,8 +92,9 @@ def main_function(decoder, train_pretrain, val_pretrain, cfg, latent_size, trunc
 
     check_direxcist(param["checkpoint_dir"])
     device = 'cuda'
-    lambda_latent_spread = float(param.get("lambda_latent_spread", 0.5))
-    lambda_volume = float(param.get("lambda_volume", 0.1))
+    lambda_super = float(param.get("lambda_super", 0.3))
+    lambda_latent_spread = float(param.get("lambda_latent_spread", 1.0))
+    lambda_volume = float(param.get("lambda_volume", 0.5))
     shuffle = True
     last_val_score = np.inf
 
@@ -238,11 +239,11 @@ def main_function(decoder, train_pretrain, val_pretrain, cfg, latent_size, trunc
 
             if param['supervised_3d']:
                 loss_super = SuperLoss(latent_batch, item['latent'])
-                loss += loss_super
+                loss += lambda_super * loss_super
 
                 # logging
-                writer.add_scalar('Loss/Train/SuperLoss', loss_super, n_iter)
-                logging_string += ' -- loss super: {}'.format(loss_super.item())
+                writer.add_scalar('Loss/Train/SuperLoss', lambda_super * loss_super, n_iter)
+                logging_string += ' -- loss super: {}'.format((lambda_super * loss_super).item())
 
                 if lambda_latent_spread > 0 and latent_batch.shape[0] > 1:
                     loss_spread = LatentSpreadLoss(latent_batch, item['latent'].to(device))
