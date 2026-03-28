@@ -95,6 +95,7 @@ def main_function(decoder, train_pretrain, val_pretrain, cfg, latent_size, trunc
     lambda_super = float(param.get("lambda_super", 0.3))
     lambda_latent_spread = float(param.get("lambda_latent_spread", 1.0))
     lambda_volume = float(param.get("lambda_volume", 0.5))
+    volume_loss_relative_weight = float(param.get("volume_loss_relative_weight", 0.5))
     shuffle = True
     last_val_score = np.inf
 
@@ -252,7 +253,7 @@ def main_function(decoder, train_pretrain, val_pretrain, cfg, latent_size, trunc
                     logging_string += ' -- loss spread: {}'.format((lambda_latent_spread * loss_spread).item())
 
             if lambda_volume > 0 and 'volume_ml' in item:
-                loss_volume = VolumeLoss(pred_volume, item['volume_ml'].to(device).view(-1, 1))
+                loss_volume = VolumeLoss(pred_volume, item['volume_ml'].to(device).view(-1, 1), relative_weight=volume_loss_relative_weight)
                 loss += lambda_volume * loss_volume
                 writer.add_scalar('Loss/Train/VolumeLoss', lambda_volume * loss_volume, n_iter)
                 logging_string += ' -- loss volume: {}'.format((lambda_volume * loss_volume).item())
@@ -378,7 +379,7 @@ def main_function(decoder, train_pretrain, val_pretrain, cfg, latent_size, trunc
                             val_losses.append(mse.item())
 
                             if lambda_volume > 0 and 'volume_ml' in item:
-                                vol_loss = VolumeLoss(pred_volume_val, item['volume_ml'].to(device).view(-1, 1))
+                                vol_loss = VolumeLoss(pred_volume_val, item['volume_ml'].to(device).view(-1, 1), relative_weight=volume_loss_relative_weight)
                                 val_volume_losses.append(vol_loss.item())
 
                             if args.overfit:

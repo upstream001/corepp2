@@ -118,8 +118,17 @@ def LatentSpreadLoss(pred, gt, eps=1e-6):
     return nn.MSELoss()(pred_std, gt_std)
 
 
-def VolumeLoss(pred_volume, target_volume, log_target=True):
+def VolumeLoss(pred_volume, target_volume, log_target=True, relative_weight=0.5, eps=1e-6):
     target = target_volume.float().view_as(pred_volume)
     if log_target:
-        target = torch.log1p(target)
-    return nn.SmoothL1Loss()(pred_volume, target)
+        target_log = torch.log1p(target)
+    else:
+        target_log = target
+
+    base_loss = nn.SmoothL1Loss()(pred_volume, target_log)
+
+    pred_volume_ml = torch.expm1(pred_volume)
+    relative_error = torch.abs(pred_volume_ml - target) / (target.abs() + eps)
+    relative_loss = relative_error.mean()
+
+    return (1.0 - relative_weight) * base_loss + relative_weight * relative_loss

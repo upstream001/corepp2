@@ -55,8 +55,12 @@
     "lambda_volume": 0.5,
     "_comment_lambda_latent_spread": "潜变量分布展开损失权重，用于抑制 encoder 输出 latent collapse；重训时提高到更强。",
     "lambda_latent_spread": 1.0,
-    "_comment_calibrate_volume_head_on_val": "测试时是否使用验证集对 volume head 做线性校准，以提升直接体积预测精度",
-    "calibrate_volume_head_on_val": true,
+    "_comment_calibrate_volume_head_on_val": "测试时是否使用验证集对 volume head 做线性校准。默认关闭，直接以 raw head 作为主结果更稳。",
+    "calibrate_volume_head_on_val": false,
     "_comment_lambda_super": "Latent MSE 主监督权重。为避免继续把预测 latent 拉回均值附近，这里显式下调。",
-    "lambda_super": 0.3
+    "lambda_super": 0.3,
+    "_comment_volume_head_calibration_degree": "保留兼容字段；当前测试逻辑默认只支持线性校准，建议维持 1 或忽略该项。",
+    "volume_head_calibration_degree": 1,
+    "_comment_volume_loss_relative_weight": "体积损失中相对误差项的权重。数值越高，训练越关注小果和大果的比例误差",
+    "volume_loss_relative_weight": 0.5
 }

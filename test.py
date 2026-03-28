@@ -242,8 +242,8 @@ def main_function(decoder, pretrain, cfg, latent_size, test_data_dir=None):
     columns = ['fruit_id',
                 'frame_id',
                 'complete_volume_ml',
-                'pred_volume_head_ml',
                 'pred_volume_head_raw_ml',
+                'pred_volume_head_ml',
                 'mesh_volume_ml',
                 'chamfer_distance',
                 'precision',
@@ -335,9 +335,8 @@ def main_function(decoder, pretrain, cfg, latent_size, test_data_dir=None):
     volume_head.to(device)
     volume_head.eval()
 
-    volume_head_scale = 1.0
-    volume_head_bias = 0.0
-    use_volume_head_calibration = bool(param.get('calibrate_volume_head_on_val', True))
+    volume_head_calibration_coeffs = np.array([1.0, 0.0], dtype=np.float64)
+    use_volume_head_calibration = bool(param.get('calibrate_volume_head_on_val', False))
 
     # transformations
     tfs = [Pad(size=param["input_size"])]
@@ -400,12 +399,11 @@ def main_function(decoder, pretrain, cfg, latent_size, test_data_dir=None):
                 cal_preds.append(raw_pred)
                 cal_targets.append(float(item['volume_ml'].item()))
         if len(cal_preds) >= 2:
-            A = np.stack([np.asarray(cal_preds, dtype=np.float64), np.ones(len(cal_preds), dtype=np.float64)], axis=1)
+            x = np.asarray(cal_preds, dtype=np.float64)
             y = np.asarray(cal_targets, dtype=np.float64)
-            volume_head_scale, volume_head_bias = np.linalg.lstsq(A, y, rcond=None)[0]
-            volume_head_scale = float(volume_head_scale)
-            volume_head_bias = float(volume_head_bias)
-            print(f"[Info] Volume-head calibration fitted on val split: scale={volume_head_scale:.6f}, bias={volume_head_bias:.6f}")
+            A = np.stack([x, np.ones(len(x), dtype=np.float64)], axis=1)
+            volume_head_calibration_coeffs = np.linalg.lstsq(A, y, rcond=None)[0]
+            print(f"[Info] Volume-head calibration fitted on val split: linear coeffs={volume_head_calibration_coeffs.tolist()}")
         else:
             print("[Warning] Not enough val samples with volume labels to calibrate volume head.")
 
@@ -436,7 +434,10 @@ def main_function(decoder, pretrain, cfg, latent_size, test_data_dir=None):
             latent = encoder(encoder_input)
             if volume_head_enabled:
                 pred_volume_head_raw_ml = torch.expm1(volume_head(latent)).item()
-                pred_volume_head_ml = max(0.0, pred_volume_head_raw_ml * volume_head_scale + volume_head_bias)
+                if use_volume_head_calibration:
+                    pred_volume_head_ml = max(0.0, float(pred_volume_head_raw_ml * volume_head_calibration_coeffs[0] + volume_head_calibration_coeffs[1]))
+                else:
+                    pred_volume_head_ml = pred_volume_head_raw_ml
             else:
                 pred_volume_head_raw_ml = float('nan')
                 pred_volume_head_ml = float('nan')
