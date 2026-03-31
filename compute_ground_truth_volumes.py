@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import argparse
 import csv
+import re
 from pathlib import Path
 
 import numpy as np
@@ -19,6 +20,17 @@ try:
     from scipy.spatial import ConvexHull  # type: ignore
 except Exception:
     ConvexHull = None
+
+
+def natural_sort_key(path: Path):
+    parts = re.split(r"(\d+)", path.name)
+    key = []
+    for part in parts:
+        if part.isdigit():
+            key.append(int(part))
+        else:
+            key.append(part.lower())
+    return key
 
 
 def volume_to_ml(volume: float, length_unit: str) -> float:
@@ -55,18 +67,21 @@ def convex_hull_volume_from_vertices(vertices: np.ndarray) -> float:
 
 def compute_volume_for_ply(path: Path) -> float:
     if trimesh is not None:
-        mesh = trimesh.load(str(path), force="mesh", process=False)
-        if mesh is None or mesh.vertices is None or len(mesh.vertices) == 0:
-            return 0.0
         try:
-            if mesh.is_volume:
-                return float(abs(mesh.volume))
-        except Exception:
-            pass
-        try:
-            return float(abs(mesh.convex_hull.volume))
-        except Exception:
-            return 0.0
+            mesh = trimesh.load(str(path), force="mesh", process=False)
+            if mesh is None or mesh.vertices is None or len(mesh.vertices) == 0:
+                return 0.0
+            try:
+                if mesh.is_volume:
+                    return float(abs(mesh.volume))
+            except Exception:
+                pass
+            try:
+                return float(abs(mesh.convex_hull.volume))
+            except Exception:
+                pass
+        except Exception as exc:
+            print(f"[Warning] trimesh failed on {path.name}: {exc}. Falling back to Open3D.")
 
     if o3d is None:
         raise RuntimeError(
@@ -75,19 +90,27 @@ def compute_volume_for_ply(path: Path) -> float:
         )
 
     mesh = o3d.io.read_triangle_mesh(str(path))
-    mesh.remove_duplicated_vertices()
-    mesh.remove_duplicated_triangles()
-    mesh.remove_degenerate_triangles()
-    mesh.remove_unreferenced_vertices()
+    if not mesh.is_empty():
+        mesh.remove_duplicated_vertices()
+        mesh.remove_duplicated_triangles()
+        mesh.remove_degenerate_triangles()
+        mesh.remove_unreferenced_vertices()
 
-    v = mesh_volume_if_possible(mesh)
-    if v >= 0:
-        return v
+        v = mesh_volume_if_possible(mesh)
+        if v >= 0:
+            return v
 
-    vertices = np.asarray(mesh.vertices)
-    v_hull = convex_hull_volume_from_vertices(vertices)
-    if v_hull >= 0:
-        return v_hull
+        vertices = np.asarray(mesh.vertices)
+        v_hull = convex_hull_volume_from_vertices(vertices)
+        if v_hull >= 0:
+            return v_hull
+
+    pcd = o3d.io.read_point_cloud(str(path))
+    if not pcd.is_empty():
+        vertices = np.asarray(pcd.points)
+        v_hull = convex_hull_volume_from_vertices(vertices)
+        if v_hull >= 0:
+            return v_hull
 
     raise RuntimeError(
         "Unable to compute hull volume without scipy. Install with `pip install scipy`."
@@ -100,12 +123,12 @@ def main() -> None:
     )
     parser.add_argument(
         "--input-dir",
-        default="/home/tianqi/corepp2/data/scanned_straw_meshed_resize_ml",
+        default="/home/tianqi/corepp2/data/45_straw",
         help="Directory containing .ply files.",
     )
     parser.add_argument(
         "--output-csv",
-        default="ground_truth.csv",
+        default="ground_truth_45_straw.csv",
         help="Output CSV path.",
     )
     parser.add_argument(
@@ -120,7 +143,7 @@ def main() -> None:
     if not input_dir.exists():
         raise FileNotFoundError(f"Input directory not found: {input_dir}")
 
-    ply_files = sorted(input_dir.glob("*.ply"))
+    ply_files = sorted(input_dir.glob("*.ply"), key=natural_sort_key)
     if not ply_files:
         raise FileNotFoundError(f"No .ply files found in: {input_dir}")
 

@@ -289,9 +289,9 @@ if __name__ == "__main__":
     # from utils.io import read_ply_xyz, export_ply
 
     parser = argparse.ArgumentParser(description='Perspective Render Test')
-    parser.add_argument('--input', type=str, default='/home/tianqi/corepp2/data/scanned_straw_meshed_resize_ml', help='Input PLY')
+    parser.add_argument('--input', type=str, default='/home/tianqi/corepp2/data/45_straw', help='Input PLY')
     parser.add_argument('--output_dir', type=str, default='/home/tianqi/corepp2/data/render_output_perspective')
-    parser.add_argument('--num', type=int, default=10)
+    parser.add_argument('--num', type=int, default=5)
     args = parser.parse_args()
 
     # 使用 open3d 进行读写，更健壮

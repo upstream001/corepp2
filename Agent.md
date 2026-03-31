@@ -73,6 +73,7 @@
 65. 针对加入 `3D_loss` 后草莓重建体积仍然集中在约 `17 mL`、无法随真实大小明显变化的问题，完成了一次系统性的 **latent collapse 排查与修复**。首先在 `conda` 的 `corepp` 环境中对 `20260312_dataset` 的 `val split` 做了对齐分析，确认 Encoder 预测 latent 的平均每维方差仅为真值 latent 的 `0.0121%`，并将这一结论与完整统计结果记录到 `problem.md`。随后在训练链路中加入了两类针对性约束：
 - 在 `loss.py` 中新增 `LatentSpreadLoss`，按 batch 对齐预测 latent 与真值 latent 的逐维标准差，直接抑制 Encoder 输出塌缩到均值附近；
 - 在 `loss.py` 中新增 `VolumeLoss`，并在 `train.py` 中为 Encoder latent 接入一个轻量 `volume_head`，直接回归 `log1p(volume_ml)`，让训练目标首次显式包含体积信息，而不再只是依赖 latent MSE 与 SDF 几何间接学习尺寸；
-- 在 `dataloaders/pointcloud_dataset.py` 中打通 `mapping.json + ground_truth.csv` 的真实体积标签读取，将 `volume_ml` 随样本一起返回；
+- 在 `dataloaders/pointcloud_dataset.py` 中打通 `mapping.json + ground_truth.csv` 的真实体积标签读取，将 `volume_ml`随样本一起返回；
 - 在 `utils.py` 的 `save_model` 中补充 `volume_head_state_dict` 保存，保证后续 checkpoint 可以完整携带这一路新增监督分支；
 - 在 `configs/strawberry.json` 中加入 `lambda_volume` 与 `lambda_latent_spread` 两个权重入口，便于后续继续调参抑制体积塌缩。
+66. 更新了 `README.md` 中的 `### My adjustments` 部分。详细补充了项目从原有的 RGB-D 强耦合架构转型为以**纯点云 (Pure Point Cloud)** 为核心输入的端到端三维补全与尺寸估计架构的说明；列举了新引入的 **PointNeXt** 等点云特征编码器；阐述了 [workflow_new.md](workflow_new.md) 的新版工作流阶段以及核心工具脚本的用途。

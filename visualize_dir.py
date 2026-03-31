@@ -2,7 +2,20 @@ import open3d as o3d
 import os
 import argparse
 import glob
+import re
 import numpy as np
+
+def natural_sort_key(path):
+    rel_path = os.path.normpath(path)
+    parts = re.split(r"(\d+)", rel_path)
+    key = []
+    for part in parts:
+        if part.isdigit():
+            key.append(int(part))
+        else:
+            key.append(part.lower())
+    return key
+
 
 def load_point_cloud(file_path):
     """
@@ -37,7 +50,7 @@ def load_point_cloud(file_path):
 
 class PointCloudVisualizer:
     def __init__(self, file_list):
-        self.file_list = sorted(file_list)
+        self.file_list = sorted(file_list, key=natural_sort_key)
         self.index = 0
         self.vis = o3d.visualization.VisualizerWithKeyCallback()
         # 创建坐标轴

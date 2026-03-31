@@ -146,12 +146,6 @@ def _compute_volume_ml(mesh, unit="cm"):
         factor = 1.0  # cm -> mL
 
     try:
-        if mesh.is_watertight():
-            return abs(float(mesh.get_volume())) * factor
-    except Exception:
-        pass
-
-    try:
         return float(ConvexHull(np.asarray(mesh.vertices)).volume) * factor
     except Exception:
         return 0.0
@@ -242,8 +236,7 @@ def main_function(decoder, pretrain, cfg, latent_size, test_data_dir=None):
     columns = ['fruit_id',
                 'frame_id',
                 'complete_volume_ml',
-                'pred_volume_head_raw_ml',
-                'pred_volume_head_ml',
+                'pred_volume_ml',
                 'mesh_volume_ml',
                 'chamfer_distance',
                 'precision',
@@ -433,14 +426,11 @@ def main_function(decoder, pretrain, cfg, latent_size, test_data_dir=None):
 
             latent = encoder(encoder_input)
             if volume_head_enabled:
-                pred_volume_head_raw_ml = torch.expm1(volume_head(latent)).item()
+                pred_volume_ml = torch.expm1(volume_head(latent)).item()
                 if use_volume_head_calibration:
-                    pred_volume_head_ml = max(0.0, float(pred_volume_head_raw_ml * volume_head_calibration_coeffs[0] + volume_head_calibration_coeffs[1]))
-                else:
-                    pred_volume_head_ml = pred_volume_head_raw_ml
+                    pred_volume_ml = max(0.0, float(pred_volume_ml * volume_head_calibration_coeffs[0] + volume_head_calibration_coeffs[1]))
             else:
-                pred_volume_head_raw_ml = float('nan')
-                pred_volume_head_ml = float('nan')
+                pred_volume_ml = float('nan')
 
             # save the latent vector for further inspection
             latent_save = latent.detach().to('cpu').squeeze()
@@ -485,11 +475,11 @@ def main_function(decoder, pretrain, cfg, latent_size, test_data_dir=None):
                     mesh_pts = _map_vertices_from_canonical_cube(mesh_pts, bbox_min, bbox_max)
                     mesh.vertices = o3d.utility.Vector3dVector(mesh_pts)
 
-                volume_ml = _compute_volume_ml(mesh, unit=volume_unit)
-                volume_ml *= volume_scale_factor
+                mesh_volume_ml = _compute_volume_ml(mesh, unit=volume_unit)
+                mesh_volume_ml *= volume_scale_factor
             except Exception as e:
                 print(f"  [Mesh Error] {item['frame_id'][0]}: {e}")
-                volume_ml = 0.0
+                mesh_volume_ml = 0.0
 
             inference_time = time.time() - start
 
@@ -501,9 +491,8 @@ def main_function(decoder, pretrain, cfg, latent_size, test_data_dir=None):
                     'fruit_id': item['fruit_id'][0],
                     'frame_id': frame_id,
                     'complete_volume_ml': round(complete_volume_ml, 6) if complete_volume_ml is not None else np.nan,
-                    'pred_volume_head_ml': round(pred_volume_head_ml, 6),
-                    'pred_volume_head_raw_ml': round(pred_volume_head_raw_ml, 6) if np.isfinite(pred_volume_head_raw_ml) else np.nan,
-                    'mesh_volume_ml': round(volume_ml, 6),
+                    'pred_volume_ml': round(pred_volume_ml, 6) if np.isfinite(pred_volume_ml) else np.nan,
+                    'mesh_volume_ml': round(mesh_volume_ml, 6),
                     'chamfer_distance': 0.0,
                     'precision': 0.0,
                     'recall': 0.0,
@@ -556,9 +545,8 @@ def main_function(decoder, pretrain, cfg, latent_size, test_data_dir=None):
                 'fruit_id': item['fruit_id'][0],
                 'frame_id': frame_id,
                 'complete_volume_ml': round(complete_volume_ml, 6) if complete_volume_ml is not None else np.nan,
-                'pred_volume_head_ml': round(pred_volume_head_ml, 6),
-                'pred_volume_head_raw_ml': round(pred_volume_head_raw_ml, 6) if np.isfinite(pred_volume_head_raw_ml) else np.nan,
-                'mesh_volume_ml': round(volume_ml, 6),
+                'pred_volume_ml': round(pred_volume_ml, 6) if np.isfinite(pred_volume_ml) else np.nan,
+                'mesh_volume_ml': round(mesh_volume_ml, 6),
                 'chamfer_distance': round(chamfer_dist_value, 6),
                 'precision': round(prec, 1),
                 'recall': round(rec, 1),

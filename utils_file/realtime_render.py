@@ -241,7 +241,7 @@ if __name__ == "__main__":
     from utils_file.io import read_ply_xyz, export_ply
 
     parser = argparse.ArgumentParser(description='Realtime Render Test')
-    parser.add_argument('--input', type=str, default='/home/tianqi/corepp2/data/scanned_straw_meshed_resize_ml', help='Input PLY file or directory')
+    parser.add_argument('--input', type=str, default='/home/tianqi/corepp2/data/45_straw', help='Input PLY file or directory')
     parser.add_argument('--vis', action='store_true', help='Visualize the results')
     parser.add_argument('--save', action='store_true', default=True, help='Save the results to disk')
     parser.add_argument('--output_dir', type=str, default='data/render_output', help='Directory to save results')

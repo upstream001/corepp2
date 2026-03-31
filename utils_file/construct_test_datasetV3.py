@@ -1,19 +1,31 @@
 import os
+import re
 import shutil
 import json
 from tqdm import tqdm
 from pathlib import Path
 
+def natural_sort_key(name):
+    parts = re.split(r"(\d+)", Path(name).name)
+    key = []
+    for part in parts:
+        if part.isdigit():
+            key.append(int(part))
+        else:
+            key.append(part.lower())
+    return key
+
+
 def main():
     # 输入目录
-    complete_pc_dir = '/home/tianqi/corepp2/data/scanned_straw_meshed_resize_ml'
+    complete_pc_dir = '/home/tianqi/corepp2/data/45_straw'
     partial_dirs_base = [
         '/home/tianqi/corepp2/data/render_output_perspective',
         '/home/tianqi/corepp2/data/render_output'
     ]
     
     # 输出目录
-    output_base_dir = '/home/tianqi/corepp2/data/20260312_dataset'
+    output_base_dir = '/home/tianqi/corepp2/data/20260331_dataset'
     partial_out_dir = os.path.join(output_base_dir, 'partial')
     complete_out_dir = os.path.join(output_base_dir, 'complete')
     
@@ -22,7 +34,7 @@ def main():
     os.makedirs(complete_out_dir, exist_ok=True)
 
     # 获取所有完整点云文件
-    complete_files = sorted([f for f in os.listdir(complete_pc_dir) if f.endswith('.ply')])
+    complete_files = sorted([f for f in os.listdir(complete_pc_dir) if f.endswith('.ply')], key=natural_sort_key)
     
     global_count = 0
     mapping = {}
@@ -44,7 +56,7 @@ def main():
                 continue
                 
             # 获取该文件夹下的所有 partial 点云
-            partial_files = sorted([f for f in os.listdir(folder_path) if f.endswith('.ply')])
+            partial_files = sorted([f for f in os.listdir(folder_path) if f.endswith('.ply')], key=natural_sort_key)
             print(f"  从 {os.path.basename(base_dir)} 中找到 {len(partial_files)} 个分量...")
             
             for part_file in tqdm(partial_files, leave=False):

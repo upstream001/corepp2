@@ -27,8 +27,8 @@ data/strawberry/
 如果你发现草莓点云的分布尺度和大小趋于一致，网络难以为未见过的大小推断体积（缺乏尺度泛化能力）。强烈推荐运行我专门为你编写的点云增强独立脚本 `augment_strawberry.py`，它会只打乱草莓的大小比例、扭转朝向和做裁切形变（但保留正确的朝外水密法线）：
 ```bash
 python data_preparation/augment_strawberry.py \
-    --src /home/tianqi/corepp2/data/20260301_dataset \
-    --dst /home/tianqi/corepp2/data/20260301_dataset \
+    --src /home/tianqi/corepp2/data/20260331_dataset \
+    --dst /home/tianqi/corepp2/data/20260331_dataset_aug \
     --json_config data_preparation/augment.json
 ```
 *(注意：扩增完成后，后续所有的第3步、第4步都要换成这个 `_aug` 的新目录，对应的实验目录也要一并建一个新的去重新跑端到端训练！)*
@@ -41,7 +41,7 @@ python data_preparation/augment_strawberry.py \
 > 2. **Free Space 远场采样**：在表面外侧 0.01~0.1 距离处额外采样 20000 个正 SDF 点，为网络在远离表面的区域提供约束，防止产生伪零等值面。
 
 ```bash
-python data_preparation/prepare_strawberry_sdf.py --src /home/tianqi/corepp2/data/20260312_dataset
+python data_preparation/prepare_strawberry_sdf.py --src /home/tianqi/corepp2/data/20260331_dataset_aug
 ```
 
 **4. 划分训练/验证/测试集 (Make Splits)**
@@ -49,7 +49,7 @@ python data_preparation/prepare_strawberry_sdf.py --src /home/tianqi/corepp2/dat
 1. 生成全局的 `split.json` 并放置在数据集根目录
 2. 生成专供 DeepSDF 使用的 `{dataset_name}_train.json`, `{dataset_name}_val.json`, `{dataset_name}_test.json` 文件放置于 `deepsdf/experiments/splits` 中以备后用。
 ```bash
-python data_preparation/make_strawberry_splits.py --data_dir /home/tianqi/corepp2/data/20260312_dataset --seed 42
+python data_preparation/make_strawberry_splits.py --data_dir /home/tianqi/corepp2/data/20260331_dataset --seed 42
 ```
 
 ---
@@ -64,7 +64,7 @@ python data_preparation/make_strawberry_splits.py --data_dir /home/tianqi/corepp
 
 **2. 启动训练**
 ```bash
-python train_deep_sdf.py --experiment ./deepsdf/experiments/20260312_dataset
+python train_deep_sdf.py --experiment ./deepsdf/experiments/20260331_dataset_aug
 ```
 根据表现选取一个最优的 Checkpoint（例如第 1000 个 Epoch，即 `1000.pth`）。
 
@@ -102,7 +102,7 @@ python train_deep_sdf.py --experiment ./deepsdf/experiments/20260312_dataset
 ```bash
 python train.py \
     --cfg ./configs/strawberry.json \
-    --experiment ./deepsdf/experiments/20260312_dataset \
+    --experiment ./deepsdf/experiments/20260331_dataset \
     --checkpoint_decoder 500
 ```
 在这里点云编码器（Encoder）会接收点云，预测出一组 Latent Code，并直接与 DeepSDF 训练阶段生成的真实 Latent Code 比较误差来更新自身权重。
@@ -110,12 +110,12 @@ python train.py \
 **3. 如果需要验证集 Latent MSE，先为 `val split` 生成真值 Latent Code**
 ```bash
 python reconstruct_deep_sdf.py \
-    --experiment ./deepsdf/experiments/20260312_dataset \
-    --data ./data/20260312_dataset \
+    --experiment ./deepsdf/experiments/20260331_dataset \
+    --data ./data/20260331_dataset \
     --checkpoint_decoder 500 \
-    --split ./deepsdf/experiments/splits/20260312_dataset_val.json
+    --split ./deepsdf/experiments/splits/20260331_dataset_val.json
 ```
-该命令会将验证集样本的优化后 Latent Code 保存到 `deepsdf/experiments/20260312_dataset/Reconstructions/500/Codes/complete/`。完成后再次运行 `train.py`，验证阶段才会真正输出 `Mean Validation Latent MSE`，而不是 `NaN`。
+该命令会将验证集样本的优化后 Latent Code 保存到 `deepsdf/experiments/20260331_dataset/Reconstructions/500/Codes/complete/`。完成后再次运行 `train.py`，验证阶段才会真正输出 `Mean Validation Latent MSE`，而不是 `NaN`。
 
 ---
 
@@ -128,7 +128,7 @@ python reconstruct_deep_sdf.py \
 ```bash
 python test.py \
     --cfg ./configs/strawberry.json \
-    --experiment ./deepsdf/experiments/20260312_dataset \
+    --experiment ./deepsdf/experiments/20260331_dataset \
     --checkpoint_decoder 500 
 ```
 
@@ -139,7 +139,7 @@ python test.py \
 ```bash
 python test.py \
     --cfg ./configs/strawberry.json \
-    --experiment ./deepsdf/experiments/20260301_dataset_aug \
+    --experiment ./deepsdf/experiments/20260331_dataset_aug \
     --checkpoint_decoder 500 \
     --test_data_dir /home/tianqi/corepp2/data/render_output_perspective/size38_16384_normalized
 ```
