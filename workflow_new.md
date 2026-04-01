@@ -129,7 +129,7 @@ python reconstruct_deep_sdf.py \
 python test.py \
     --cfg ./configs/strawberry.json \
     --experiment ./deepsdf/experiments/20260331_dataset \
-    --checkpoint_decoder 500 
+    --checkpoint_decoder 100 
 ```
 
 在默认状态下，测试脚本会自动读取 `data/dataset_name/split.json` 里标注的 `test` 划分集数据进行验证评估。

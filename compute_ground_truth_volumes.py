@@ -128,7 +128,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--output-csv",
-        default="ground_truth_45_straw.csv",
+        default="ground_truth.csv",
         help="Output CSV path.",
     )
     parser.add_argument(
