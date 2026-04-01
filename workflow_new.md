@@ -41,7 +41,7 @@ python data_preparation/augment_strawberry.py \
 > 2. **Free Space 远场采样**：在表面外侧 0.01~0.1 距离处额外采样 20000 个正 SDF 点，为网络在远离表面的区域提供约束，防止产生伪零等值面。
 
 ```bash
-python data_preparation/prepare_strawberry_sdf.py --src /home/tianqi/corepp2/data/20260331_dataset_aug
+python data_preparation/prepare_strawberry_sdf.py --src /home/tianqi/corepp2/data/20260331_dataset
 ```
 
 **4. 划分训练/验证/测试集 (Make Splits)**
@@ -64,7 +64,7 @@ python data_preparation/make_strawberry_splits.py --data_dir /home/tianqi/corepp
 
 **2. 启动训练**
 ```bash
-python train_deep_sdf.py --experiment ./deepsdf/experiments/20260331_dataset_aug
+python train_deep_sdf.py --experiment ./deepsdf/experiments/20260331_dataset
 ```
 根据表现选取一个最优的 Checkpoint（例如第 1000 个 Epoch，即 `1000.pth`）。
 
@@ -103,7 +103,7 @@ python train_deep_sdf.py --experiment ./deepsdf/experiments/20260331_dataset_aug
 python train.py \
     --cfg ./configs/strawberry.json \
     --experiment ./deepsdf/experiments/20260331_dataset \
-    --checkpoint_decoder 500
+    --checkpoint_decoder 100
 ```
 在这里点云编码器（Encoder）会接收点云，预测出一组 Latent Code，并直接与 DeepSDF 训练阶段生成的真实 Latent Code 比较误差来更新自身权重。
 
@@ -112,10 +112,10 @@ python train.py \
 python reconstruct_deep_sdf.py \
     --experiment ./deepsdf/experiments/20260331_dataset \
     --data ./data/20260331_dataset \
-    --checkpoint_decoder 500 \
+    --checkpoint_decoder 100 \
     --split ./deepsdf/experiments/splits/20260331_dataset_val.json
 ```
-该命令会将验证集样本的优化后 Latent Code 保存到 `deepsdf/experiments/20260331_dataset/Reconstructions/500/Codes/complete/`。完成后再次运行 `train.py`，验证阶段才会真正输出 `Mean Validation Latent MSE`，而不是 `NaN`。
+该命令会将验证集样本的优化后 Latent Code 保存到 `deepsdf/experiments/20260331_dataset/Reconstructions/100/Codes/complete/`。完成后再次运行 `train.py`，验证阶段才会真正输出 `Mean Validation Latent MSE`，而不是 `NaN`。
 
 ---
 
@@ -139,7 +139,7 @@ python test.py \
 ```bash
 python test.py \
     --cfg ./configs/strawberry.json \
-    --experiment ./deepsdf/experiments/20260331_dataset_aug \
+    --experiment ./deepsdf/experiments/20260331_dataset \
     --checkpoint_decoder 500 \
     --test_data_dir /home/tianqi/corepp2/data/render_output_perspective/size38_16384_normalized
 ```

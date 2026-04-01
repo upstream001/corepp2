@@ -77,3 +77,4 @@
 - 在 `utils.py` 的 `save_model` 中补充 `volume_head_state_dict` 保存，保证后续 checkpoint 可以完整携带这一路新增监督分支；
 - 在 `configs/strawberry.json` 中加入 `lambda_volume` 与 `lambda_latent_spread` 两个权重入口，便于后续继续调参抑制体积塌缩。
 66. 更新了 `README.md` 中的 `### My adjustments` 部分。详细补充了项目从原有的 RGB-D 强耦合架构转型为以**纯点云 (Pure Point Cloud)** 为核心输入的端到端三维补全与尺寸估计架构的说明；列举了新引入的 **PointNeXt** 等点云特征编码器；阐述了 [workflow_new.md](workflow_new.md) 的新版工作流阶段以及核心工具脚本的用途。
+67. 修正了 `workflow_new.md` 中的多处命令示例不一致问题：(1) 将 `make_strawberry_splits.py` 的数据目录示例更正为扩增后的 `_aug` 目录，以确保生成的划分文件与后续训练和重建流程匹配；(2) 纠正了 `reconstruct_deep_sdf.py` 在验证环节使用的 `--split` 路径，将其指向包含 `_aug_val.json` 后缀的划分文件，彻底解决了因 ID 不匹配（如缺少 `_aug_xx` 后缀）导致的 `FileNotFoundError`；(3) 统一了测试环节的实验目录名，确保所有阶段均指向一致的 `20260331_dataset_aug` 路径。

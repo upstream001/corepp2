@@ -2,7 +2,7 @@
     "_comment_species": "当前处理的水果类型名称，用于在一些日志和输出中区分",
     "species": "strawberry",
     "_comment_data_dir": "纯点云数据（包含 complete 和可选的 partial 文件夹）的存储根目录",
-    "data_dir": "/home/tianqi/corepp2/data/20260312_dataset/",
+    "data_dir": "/home/tianqi/corepp2/data/20260331_dataset_aug/",
     "_comment_checkpoint_dir": "Encoder 模型权重(checkpoints)在训练期间保存的路径",
     "checkpoint_dir": "./logs/strawberry/checkpoints/",
     "_comment_checkpoint_file": "最佳模型保存的自定义命名后缀",
