@@ -119,3 +119,8 @@ https://www.ipb.uni-bonn.de/wp-content/papercite-data/pdf/magistri2022ral-iros.p
 - `train.py` / `test.py`: 外部编码器训练与全流程测试评估。`test.py` 已集成 Marching Cubes 提取、Taubin 平滑滤波、连通域清理及基于凸包的可靠体积计算。
 - `dataloaders/pointcloud_dataset.py`: 专为纯点云设计的 Dataset 类，支持中心化、动态边界盒计算及自动匹配 DeepSDF Latent 真值。
 - `configs/`: 包含 `strawberry.json` 等配置文件，支持通过参数一键切换编码器类型、损失函数权重以及物理尺度对齐系数。
+
+#### 6.部分结果可视化
+![Result 1](readme_file/Peek%202026-02-28%2018-00.gif)
+![Result 2](readme_file/Peek%202026-03-10%2018-00.gif)
+
