@@ -90,7 +90,7 @@ https://www.ipb.uni-bonn.de/wp-content/papercite-data/pdf/magistri2022ral-iros.p
 
 ### My adjustments
 
-本项目在原始 CoRa++ 的基础上进行了重大改进，主要将其扩展为支持**纯点云 (Pure Point Cloud)** 输入的端到端三维补全与尺寸估计架构。
+本项目在原始 CoRe++ 的基础上进行了重大改进，主要将其扩展为支持**纯点云 (Pure Point Cloud)** 输入的端到端三维补全与尺寸估计架构。
 
 #### 1. 数据准备工具 (Data Preparation)
 除了核心训练流程外，本项目还提供了一系列用于构建点云补全数据集的工具：
@@ -112,15 +112,14 @@ https://www.ipb.uni-bonn.de/wp-content/papercite-data/pdf/magistri2022ral-iros.p
 - **数据准备**：包括点云几何增强 (`augment_strawberry.py`)、修复了法线翻转问题的 SDF 采样生成 (`prepare_strawberry_sdf.py`) 以及支持随机种子的数据集切分 (`make_strawberry_splits.py`)。
 - **DeepSDF 预训练**：训练解码器（Decoder）以掌握物体的通用隐式表示。
 - **编码器训练**：使用 `train.py` 训练编码器，将其预测结果对齐到 DeepSDF 的潜变量空间。
-- **物理体积推断**：通过 `test.py` 直接 from 残缺点云生成补全 Mesh，并结合 `normalization_scale` 参数输出具有真实物理意义的体积（ml）。
+- **物理体积推断**：当前主要通过 `volume_head` 从编码器预测的 DeepSDF latent 中直接回归体积（ml）。这样做是因为由补全 Mesh 后处理得到的几何体积方差较小，容易压缩不同样本之间的体积差异；`volume_head` 在训练时使用 `volume_ml` 监督，更适合作为当前体积估计结果。`test.py` 仍会生成补全 Mesh，并额外输出基于网格几何计算的 `mesh_volume_ml` 作为参考。
 
 #### 5. 关键文件说明
 - `train_deep_sdf.py` / `reconstruct_deep_sdf.py`: DeepSDF 的核心训练与潜变量优化脚本。
-- `train.py` / `test.py`: 外部编码器训练与全流程测试评估。`test.py` 已集成 Marching Cubes 提取、Taubin 平滑滤波、连通域清理及基于凸包的可靠体积计算。
+- `train.py` / `test.py`: 外部编码器训练与全流程测试评估。`train.py` 训练 latent 回归与 `volume_head` 体积回归分支；`test.py` 已集成 Marching Cubes 提取、连通域清理、Laplacian 平滑，并同时输出 `pred_volume_ml` 和参考用的 `mesh_volume_ml`。
 - `dataloaders/pointcloud_dataset.py`: 专为纯点云设计的 Dataset 类，支持中心化、动态边界盒计算及自动匹配 DeepSDF Latent 真值。
 - `configs/`: 包含 `strawberry.json` 等配置文件，支持通过参数一键切换编码器类型、损失函数权重以及物理尺度对齐系数。
 
 #### 6.部分结果可视化
 ![Result 1](readme_file/Peek%202026-02-28%2018-00.gif)
 ![Result 2](readme_file/Peek%202026-03-10%2018-00.gif)
-
