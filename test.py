@@ -228,6 +228,78 @@ def _write_aligned_csv(dataframe, output_path):
         f.write("\n".join(lines) + "\n")
 
 
+VOLUME_SUMMARY_COLUMNS = [
+    "volume_mae_ml",
+    "volume_rmse_ml",
+    "volume_mape_percent",
+    "volume_r2",
+]
+
+
+def _volume_regression_metrics(gt_values, pred_values):
+    gt = pd.to_numeric(gt_values, errors="coerce").to_numpy(dtype=np.float64)
+    pred = pd.to_numeric(pred_values, errors="coerce").to_numpy(dtype=np.float64)
+    valid = np.isfinite(gt) & np.isfinite(pred)
+    if valid.sum() == 0:
+        return {col: np.nan for col in VOLUME_SUMMARY_COLUMNS}
+
+    gt = gt[valid]
+    pred = pred[valid]
+    err = pred - gt
+    mae = np.mean(np.abs(err))
+    rmse = np.sqrt(np.mean(err ** 2))
+
+    nonzero = np.abs(gt) > 1e-12
+    mape = np.nan
+    if nonzero.any():
+        mape = np.mean(np.abs(err[nonzero] / gt[nonzero])) * 100.0
+
+    ss_res = np.sum(err ** 2)
+    ss_tot = np.sum((gt - np.mean(gt)) ** 2)
+    r2 = np.nan if ss_tot <= 1e-12 else 1.0 - ss_res / ss_tot
+
+    return {
+        "volume_mae_ml": round(float(mae), 6),
+        "volume_rmse_ml": round(float(rmse), 6),
+        "volume_mape_percent": round(float(mape), 3) if np.isfinite(mape) else np.nan,
+        "volume_r2": round(float(r2), 6) if np.isfinite(r2) else np.nan,
+    }
+
+
+def _with_mean_summary_row(dataframe):
+    if dataframe.empty:
+        return dataframe
+
+    volume_metrics = {}
+    if "complete_volume_ml" in dataframe.columns and "mesh_volume_ml" in dataframe.columns:
+        volume_metrics = _volume_regression_metrics(
+            dataframe["complete_volume_ml"],
+            dataframe["mesh_volume_ml"],
+        )
+
+    summary = {}
+    for col in dataframe.columns:
+        if col == "fruit_id":
+            summary[col] = "SUMMARY"
+        elif col == "frame_id":
+            summary[col] = f"n={len(dataframe)}"
+        elif col in VOLUME_SUMMARY_COLUMNS:
+            summary[col] = volume_metrics.get(col, np.nan)
+        else:
+            values = pd.to_numeric(dataframe[col], errors="coerce")
+            mean_value = values.mean(skipna=True)
+            if pd.isna(mean_value):
+                summary[col] = np.nan
+            elif col == "chamfer_distance":
+                summary[col] = round(float(mean_value), 6)
+            elif "volume_ml" in col:
+                summary[col] = round(float(mean_value), 6)
+            else:
+                summary[col] = round(float(mean_value), 1)
+
+    return pd.concat([dataframe, pd.DataFrame([summary])], ignore_index=True)
+
+
 def main_function(decoder, pretrain, cfg, latent_size, test_data_dir=None):
     torch.manual_seed(133)
     np.random.seed(133)
@@ -238,6 +310,10 @@ def main_function(decoder, pretrain, cfg, latent_size, test_data_dir=None):
                 'complete_volume_ml',
                 'pred_volume_ml',
                 'mesh_volume_ml',
+                'volume_mae_ml',
+                'volume_rmse_ml',
+                'volume_mape_percent',
+                'volume_r2',
                 'chamfer_distance',
                 'precision',
                 'recall',
@@ -566,6 +642,12 @@ def main_function(decoder, pretrain, cfg, latent_size, test_data_dir=None):
             save_df_multi = pd.concat([save_df_multi, pd.DataFrame([cur_multi])], ignore_index=True)
             _write_aligned_csv(save_df_multi, "shape_completion_results_multi_threshold.csv")
 
+
+        save_df_with_summary = _with_mean_summary_row(save_df)
+        save_df_with_summary.to_csv("shape_completion_results.csv", mode='w+', index=False)
+
+        save_df_multi_with_summary = _with_mean_summary_row(save_df_multi)
+        _write_aligned_csv(save_df_multi_with_summary, "shape_completion_results_multi_threshold.csv")
 
         print(f"Average time for 3D shape completion, including postprocessing: {np.mean(exec_time)*1e3:.1f} ms")
         print("Results saved in: " + os.getcwd() + "/shape_completion_results.csv")

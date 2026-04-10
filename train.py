@@ -58,6 +58,62 @@ def decode_sdf_in_chunks(decoder, latent_batch, grid_batch, latent_size, chunk_s
     return torch.stack(pred_sdf, dim=0)
 
 
+def _mesh_volume_ml(mesh, unit="cm"):
+    if mesh is None or len(mesh.vertices) == 0 or len(mesh.triangles) == 0:
+        return float("nan")
+
+    try:
+        volume = abs(float(mesh.get_volume()))
+    except Exception:
+        return float("nan")
+
+    if unit == "mm":
+        return volume / 1000.0
+    if unit == "m":
+        return volume * 1_000_000.0
+    return volume
+
+
+def _rmse(values_a, values_b):
+    arr_a = np.asarray(values_a, dtype=np.float64)
+    arr_b = np.asarray(values_b, dtype=np.float64)
+    return float(np.sqrt(np.mean((arr_a - arr_b) ** 2)))
+
+
+def _compute_decoder_mesh_volume_ml(decoder, latent, mesh_filename, grid_density, unit, volume_scale_factor):
+    import deepsdf.deep_sdf.mesh
+
+    with torch.no_grad():
+        deepsdf.deep_sdf.mesh.create_mesh(
+            decoder,
+            latent,
+            mesh_filename,
+            start=0.0,
+            N=grid_density,
+            max_batch=int(2 ** 18),
+        )
+
+    import open3d as o3d
+    from scipy.spatial import ConvexHull
+
+    mesh = o3d.io.read_triangle_mesh(mesh_filename + ".ply")
+    if len(mesh.vertices) == 0 or len(mesh.triangles) == 0:
+        return float("nan")
+
+    vertices = np.asarray(mesh.vertices)
+    try:
+        volume = float(ConvexHull(vertices).volume)
+    except Exception:
+        return float("nan")
+
+    if unit == "mm":
+        volume /= 1000.0
+    elif unit == "m":
+        volume *= 1_000_000.0
+
+    return volume * volume_scale_factor
+
+
 def resolve_supervision_path(experiment_directory, checkpoint, split, allow_matrix):
     matrix_path = os.path.join(experiment_directory, ws.latent_codes_subdir, checkpoint + ".pth")
     codes_root = os.path.join(experiment_directory, "Reconstructions", checkpoint, "Codes")
@@ -96,6 +152,11 @@ def main_function(decoder, train_pretrain, val_pretrain, cfg, latent_size, trunc
     lambda_latent_spread = float(param.get("lambda_latent_spread", 1.0))
     lambda_volume = float(param.get("lambda_volume", 0.5))
     volume_loss_relative_weight = float(param.get("volume_loss_relative_weight", 0.5))
+    train_volume_head = lambda_volume > 0
+    validate_mesh_volume = bool(param.get("validate_mesh_volume", True))
+    volume_unit = str(param.get("volume_unit", "cm")).lower()
+    volume_scale_factor = float(param.get("volume_scale_factor", 1.0))
+    validation_mesh_dir = os.path.join(param["checkpoint_dir"], "..", "val_output")
     shuffle = True
     last_val_score = np.inf
 
@@ -178,9 +239,11 @@ def main_function(decoder, train_pretrain, val_pretrain, cfg, latent_size, trunc
     dataset = DataLoader(cl_dataset, batch_size=param["batch_size"], shuffle=shuffle, drop_last=True)
 
     if update_decoder:
-        params = list(encoder.parameters()) + list(volume_head.parameters()) + list(decoder.parameters())
+        params = list(encoder.parameters()) + list(decoder.parameters())
     else:
-        params = list(encoder.parameters()) + list(volume_head.parameters())
+        params = list(encoder.parameters())
+    if train_volume_head:
+        params += list(volume_head.parameters())
     
     optim = torch.optim.Adam(params, lr=param["lr"], weight_decay=1e-6)
     scheduler = torch.optim.lr_scheduler.ExponentialLR(optim, gamma=0.97)
@@ -192,7 +255,10 @@ def main_function(decoder, train_pretrain, val_pretrain, cfg, latent_size, trunc
 
     # import ipdb; ipdb.set_trace()
     n_iter = 0  # used for tensorboard
+    last_epoch = -1
+    last_loss = torch.tensor(float("nan"), device=device)
     for e in range(param["epoch"]):
+        last_epoch = e
         for idx, item in enumerate(iter(dataset)):
 
             # import ipdb;ipdb.set_trace()
@@ -213,7 +279,15 @@ def main_function(decoder, train_pretrain, val_pretrain, cfg, latent_size, trunc
             norms_batch = torch.linalg.norm(latent_batch_unnormd, dim=1)
 
             latent_batch = latent_batch_unnormd #/ norms_batch.unsqueeze(dim=1)
-            pred_volume = volume_head(latent_batch)
+            if train_volume_head:
+                pred_volume = volume_head(latent_batch)
+
+            writer.add_scalar('Debug/Train/LatentNormMean', norms_batch.mean(), n_iter)
+            writer.add_scalar('Debug/Train/LatentNormStd', norms_batch.std(unbiased=False), n_iter)
+            if 'latent' in item:
+                target_norms = torch.linalg.norm(item['latent'].to(device), dim=1)
+                writer.add_scalar('Debug/Train/TargetLatentNormMean', target_norms.mean(), n_iter)
+                writer.add_scalar('Debug/Train/TargetLatentNormStd', target_norms.std(unbiased=False), n_iter)
 
             if param["contrastive"]:
                 fruit_ids = [list(dataset.dataset.Ks.keys()).index(fid) for fid in item['fruit_id']]
@@ -252,7 +326,7 @@ def main_function(decoder, train_pretrain, val_pretrain, cfg, latent_size, trunc
                     writer.add_scalar('Loss/Train/LatentSpreadLoss', lambda_latent_spread * loss_spread, n_iter)
                     logging_string += ' -- loss spread: {}'.format((lambda_latent_spread * loss_spread).item())
 
-            if lambda_volume > 0 and 'volume_ml' in item:
+            if train_volume_head and 'volume_ml' in item:
                 loss_volume = VolumeLoss(pred_volume, item['volume_ml'].to(device).view(-1, 1), relative_weight=volume_loss_relative_weight)
                 loss += lambda_volume * loss_volume
                 writer.add_scalar('Loss/Train/VolumeLoss', lambda_volume * loss_volume, n_iter)
@@ -306,6 +380,7 @@ def main_function(decoder, train_pretrain, val_pretrain, cfg, latent_size, trunc
 
             loss.backward()
             optim.step()
+            last_loss = loss.detach()
 
             # tensorboard logging
             writer.add_scalar('LRate', scheduler.get_last_lr()[0], n_iter)
@@ -362,6 +437,8 @@ def main_function(decoder, train_pretrain, val_pretrain, cfg, latent_size, trunc
 
                 val_losses = []
                 val_volume_losses = []
+                gt_mesh_volumes = []
+                pred_mesh_volumes = []
                 print('\nvalidation...')
                 if val_supervised:
                     for sample_idx, item in enumerate(tqdm(iter(val_dataset))):
@@ -372,15 +449,30 @@ def main_function(decoder, train_pretrain, val_pretrain, cfg, latent_size, trunc
                                 encoder_input = item['partial_pcd'].permute(0, 2, 1).to(device)
 
                             latent_val = encoder(encoder_input)
-                            pred_volume_val = volume_head(latent_val)
 
                             target_latent = item['latent'].to(device)
                             mse = torch.nn.functional.mse_loss(latent_val.squeeze(), target_latent.squeeze())
                             val_losses.append(mse.item())
 
-                            if lambda_volume > 0 and 'volume_ml' in item:
+                            if train_volume_head and 'volume_ml' in item:
+                                pred_volume_val = volume_head(latent_val)
                                 vol_loss = VolumeLoss(pred_volume_val, item['volume_ml'].to(device).view(-1, 1), relative_weight=volume_loss_relative_weight)
                                 val_volume_losses.append(vol_loss.item())
+
+                            if validate_mesh_volume and 'volume_ml' in item:
+                                os.makedirs(validation_mesh_dir, exist_ok=True)
+                                mesh_filename = os.path.join(validation_mesh_dir, item['fruit_id'][0])
+                                pred_mesh_volume = _compute_decoder_mesh_volume_ml(
+                                    decoder,
+                                    latent_val,
+                                    mesh_filename,
+                                    grid_density,
+                                    volume_unit,
+                                    volume_scale_factor,
+                                )
+                                if np.isfinite(pred_mesh_volume):
+                                    pred_mesh_volumes.append(pred_mesh_volume)
+                                    gt_mesh_volumes.append(float(item['volume_ml'].item()))
 
                             if args.overfit:
                                 break
@@ -404,6 +496,11 @@ def main_function(decoder, train_pretrain, val_pretrain, cfg, latent_size, trunc
                 else:
                     val_volume_loss = float('nan')
 
+                if len(pred_mesh_volumes) > 0:
+                    rmse_mesh_volume = _rmse(gt_mesh_volumes, pred_mesh_volumes)
+                else:
+                    rmse_mesh_volume = float('nan')
+
                 if np.isfinite(rmse_volume):
                     print('Mean Validation Latent MSE: ', round(rmse_volume, 5))
                 else:
@@ -414,7 +511,14 @@ def main_function(decoder, train_pretrain, val_pretrain, cfg, latent_size, trunc
                 else:
                     print('Mean Validation Volume Loss: NaN')
 
-                if np.isfinite(rmse_volume) and np.isfinite(val_volume_loss):
+                if np.isfinite(rmse_mesh_volume):
+                    print('Validation Mesh Volume RMSE: ', round(rmse_mesh_volume, 5))
+                else:
+                    print('Validation Mesh Volume RMSE: NaN')
+
+                if np.isfinite(rmse_mesh_volume):
+                    val_score = rmse_mesh_volume
+                elif np.isfinite(rmse_volume) and np.isfinite(val_volume_loss):
                     val_score = rmse_volume + lambda_volume * val_volume_loss
                 else:
                     val_score = rmse_volume
@@ -423,21 +527,53 @@ def main_function(decoder, train_pretrain, val_pretrain, cfg, latent_size, trunc
             writer.add_scalar('Val/rmse_volume', rmse_volume, n_iter)
             if np.isfinite(val_volume_loss):
                 writer.add_scalar('Val/volume_loss', val_volume_loss, n_iter)
+            if np.isfinite(rmse_mesh_volume):
+                writer.add_scalar('Val/mesh_volume_rmse', rmse_mesh_volume, n_iter)
             if np.isfinite(val_score):
                 writer.add_scalar('Val/score', val_score, n_iter)
             # saving best model
             if np.isfinite(val_score) and val_score < last_val_score:
                 last_val_score = val_score
-                save_model(encoder, decoder, e, optim, loss, param["checkpoint_dir"]+'_'+cfg_fname+'_best_model.pt', volume_head=volume_head)
+                save_model(
+                    encoder,
+                    decoder,
+                    e,
+                    optim,
+                    loss,
+                    param["checkpoint_dir"]+'_'+cfg_fname+'_best_model.pt',
+                    volume_head=volume_head if train_volume_head else None,
+                )
                 print('saving best model')
             print()
 
         # saving checkpoints
         if (e+1) % param["checkpoint_frequency"] == 0:
-            save_model(encoder, decoder, e, optim, loss,  param["checkpoint_dir"]+'_'+cfg_fname+'_checkpoint.pt', volume_head=volume_head)
+            save_model(
+                encoder,
+                decoder,
+                e,
+                optim,
+                loss,
+                param["checkpoint_dir"]+'_'+cfg_fname+'_checkpoint.pt',
+                volume_head=volume_head if train_volume_head else None,
+            )
 
     # saving last model
-    save_model(encoder, decoder, e, optim, loss,  param["checkpoint_dir"]+'_'+cfg_fname+'_final_model.pt', volume_head=volume_head)
+    if n_iter == 0:
+        raise RuntimeError(
+            "No training iterations were run. Check that `epoch` is > 0, the train split is non-empty, "
+            "and DataLoader is not dropping all samples with drop_last=True."
+        )
+
+    save_model(
+        encoder,
+        decoder,
+        last_epoch,
+        optim,
+        last_loss,
+        param["checkpoint_dir"]+'_'+cfg_fname+'_final_model.pt',
+        volume_head=volume_head if train_volume_head else None,
+    )
 
     return
 

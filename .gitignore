@@ -30,3 +30,4 @@ __pycache__/
 .vscode/
 .idea/
 .DS_Store
+architecture_regression.md
