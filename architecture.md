@@ -1,542 +1,630 @@
-# CoRe++ 当前代码架构说明
+# 最终架构：草莓点云到 DeepSDF 网格
 
-本文档按当前仓库代码整理系统结构，而不是按论文或旧版实现描述。现在的仓库本质上由两段式流程组成：
+本文档记录在排查并修复 `mesh_volume_ml` 体积坍塌问题后，当前验证有效的最终架构。当前仓库的草莓主流程是两阶段系统：
 
 1. `train_deep_sdf.py` / `reconstruct_deep_sdf.py`
-   负责训练 DeepSDF 解码器，并通过潜变量优化得到样本级 latent code。
+   训练 DeepSDF decoder，并通过 latent optimization 获得样本级 latent code。
 2. `train.py` / `test.py`
-   负责训练一个外部编码器，将输入观测直接映射到 DeepSDF latent space，再调用固定的 DeepSDF 解码器完成重建。
+   训练 PointNeXt encoder，将点云直接映射到 DeepSDF latent space，再调用固定 DeepSDF decoder 重建 mesh。
 
-## 1. 总体数据流
-当前代码支持两类输入分支：
+## 1. 总体目标
 
-- RGB-D 分支
-  来自 [`dataloaders/cameralaser_w_masks.py`](/home/tianqi/corepp2/dataloaders/cameralaser_w_masks.py)，输入是 `rgb + depth`，主要对应原始 CoRe++ 流程。
-- 纯点云分支
-  来自 [`dataloaders/pointcloud_dataset.py`](/home/tianqi/corepp2/dataloaders/pointcloud_dataset.py)，输入是 `partial_pcd` 或 `complete` 点云，当前很多草莓相关实验走这条分支。
+任务是从已配准的草莓点云预测 DeepSDF latent code，然后使用预训练 DeepSDF decoder 重建网格，并基于重建几何体估计体积。
 
-统一推理链路如下：
+最终验证有效的流程是：
 
-1. 数据集读取样本，并整理为统一字典格式，例如 `partial_pcd`、`target_pcd`、`latent`、`bbox`、`center`、`scale`、`volume_ml`。
-2. 编码器将输入观测映射为一个固定维度 latent vector。
-3. 训练阶段可选的 `volume_head` 会从 latent 直接回归体积，用真实 `volume_ml` 做显式体积监督。
-4. DeepSDF 解码器接收 `latent + xyz` 查询点，输出对应 SDF。
-5. 测试阶段通过 `deepsdf.deep_sdf.mesh.create_mesh()` 在规则网格上查询 SDF 并导出网格。
-6. 在生成网格后计算体积、Chamfer Distance、Precision/Recall/F1，并写入 CSV；若 checkpoint 中包含 `volume_head_state_dict`，还会同时输出 latent 回归得到的 `pred_volume_ml`。
+```text
+已配准完整/残缺点云
+    -> PointNeXt encoder
+    -> DeepSDF latent code
+    -> 预训练 DeepSDF decoder
+    -> marching-cubes mesh
+    -> mesh volume / Chamfer / F1 指标
+```
 
-## 2. 模块分层
+最终评估使用的体积是 `mesh_volume_ml`，它来自 decoder 生成的 mesh。最终架构中禁用了辅助 `volume_head`。
 
-### 2.1 入口脚本
+## 2. 当前关键配置
+
+当前有效的 `configs/strawberry.json` 核心配置：
+
+```json
+{
+  "encoder": "pointnext",
+  "supervised_3d": true,
+  "3D_loss": false,
+  "lambda_super": 1.0,
+  "lambda_latent_spread": 5.0,
+  "lambda_volume": 0.0,
+  "validate_mesh_volume": true,
+  "grid_density": 30,
+  "input_size": 2048,
+  "batch_size": 4,
+  "epoch": 50
+}
+```
+
+关键说明：
+
+- `3D_loss=false`：关闭低分辨率 SDF/grid loss。该 loss 曾把 encoder 推向平均尺寸 decoder 行为。
+- `lambda_super=1.0`：保持强 latent MSE 监督，让 encoder 输出贴近 DeepSDF latent space。
+- `lambda_latent_spread=5.0`：显式保持 batch 内 latent 方差，防止 latent 围绕均值坍塌。
+- `lambda_volume=0.0`：禁用 volume head。单独的 volume head 可以学到体积，但不一定能迫使 decoder mesh 体现该体积。
+- `validate_mesh_volume=true`：验证阶段生成 decoder mesh，并使用 mesh-volume RMSE 选择 best checkpoint。
+
+## 3. 模块分层
+
+### 3.1 入口脚本
 
 - [`train_deep_sdf.py`](/home/tianqi/corepp2/train_deep_sdf.py)
-  训练 DeepSDF 解码器和训练集 latent embedding。
+  训练 DeepSDF decoder 和训练集 latent embeddings。
 - [`reconstruct_deep_sdf.py`](/home/tianqi/corepp2/reconstruct_deep_sdf.py)
-  对指定 split 做 latent optimization，输出重建网格和样本级 latent code。
+  对指定 split 做 latent optimization，输出样本级 optimized latent 和 mesh。
 - [`train.py`](/home/tianqi/corepp2/train.py)
-  训练外部编码器，使其预测的 latent 对齐 DeepSDF latent space。
+  训练外部 encoder，使其预测 latent 对齐 DeepSDF latent space。
 - [`test.py`](/home/tianqi/corepp2/test.py)
-  加载编码器和 DeepSDF 解码器，生成网格并输出评估结果。
+  加载 encoder 和 DeepSDF decoder，生成 mesh 并输出评估结果。
+- [`test_unseen_data.py`](/home/tianqi/corepp2/test_unseen_data.py)
+  对 D405 等 unseen 点云目录做直接推理。
 - [`compute_reconstruction_metrics.py`](/home/tianqi/corepp2/compute_reconstruction_metrics.py)
-  一个更独立的离线指标脚本，用预测网格目录和 GT 点云目录直接算指标。
+  离线指标脚本，用预测 mesh 目录和 GT 点云目录直接计算指标。
 
-### 2.2 数据层
+### 3.2 数据层
+
+当前草莓主流程使用：
+
 - [`dataloaders/pointcloud_dataset.py`](/home/tianqi/corepp2/dataloaders/pointcloud_dataset.py)
-  负责从 `complete/` 或 `partial/` 目录直接读取 `.ply`，并可从 DeepSDF latent matrix 或逐样本 `.pth` 中取监督信号；如果数据目录存在 `mapping.json` 且仓库根目录存在 `ground_truth.csv`，还会把对应真实体积作为 `volume_ml` 返回。
 
-### 2.3 编码器层
+其行为：
 
-编码器实现主要在：
+1. 从 `complete/` 或 `partial/` 目录读取 `.ply`。
+2. 采样或重复采样到固定点数 `input_size`。
+3. 对点云做 zero-centering，即减去整云几何中心。
+4. 当前默认 `scale = 1.0`，不把点云缩放到单位球。
+5. 根据采样点计算带 margin 的局部 `bbox`。
+6. 如果存在 `mapping.json` 和 `ground_truth.csv`，返回对应真实体积 `volume_ml`。
 
-- [`networks/models.py`](/home/tianqi/corepp2/networks/models.py)
+因此当前主路径是：
+
+```text
+中心对齐，但保留原始尺度
+```
+
+这点对体积估计非常重要。此前 D405 unseen 脚本因额外做单位球归一化并把 mesh 乘回 `scale`，导致体积被 `scale^3` 放大，已经修复。
+
+### 3.3 编码器层
+
+当前草莓主实验使用：
+
 - [`networks/pointnext.py`](/home/tianqi/corepp2/networks/pointnext.py)
+- `PointNeXtEncoder`
 
 `train.py` / `test.py` 会按配置中的 `param["encoder"]` 动态实例化编码器。当前支持：
 
 - `Encoder` / `EncoderBig` / `EncoderPooled` / `EncoderBigPooled`
-  标准 2D CNN 编码器，输入通常是 `rgb + depth` 组成的 4 通道张量。
 - `ERFNetEncoder`
-  ERFNet 风格编码器。
 - `DoubleEncoder`
-  RGB 与 Depth 双分支编码器，内部带多种融合模块。
 - `PointCloudEncoder` / `PointCloudEncoderLarge`
-  纯点云 MLP 风格编码器。
 - `FoldNetEncoder`
-  FoldNet 风格点云编码器。
 - `PointNeXtEncoder`
-  当前代码中最明确、最现代的纯点云编码器实现。
 
-编码器输出 latent 后，当前 `train.py` 和 `test.py` 还会构造一个轻量体积回归头：
+当前最终架构中，encoder 只负责输出 DeepSDF latent code，不再训练或使用 volume head。
 
-$$
-\hat{v}_{\log} = h_{\phi}(\hat{\mathbf{z}})
-$$
+### 3.4 DeepSDF decoder
 
-其中 `volume_head` 是 `Linear(latent_size, latent_size) -> ReLU -> Linear(latent_size, 1)`。它不替代 DeepSDF 解码器，只是从同一个 latent 上附加一个体积回归分支，用于缓解只靠 latent MSE 或 SDF 几何监督时体积容易塌缩到均值附近的问题。
+DeepSDF decoder 来自实验目录中的 `specs.json`，实际类从 `deepsdf.networks.*` 动态导入。标准形式：
 
-### 2.4 解码器层
+```text
+输入: [latent_code, x, y, z]
+输出: SDF 标量
+```
 
-DeepSDF 解码器来自实验目录中的 `specs.json` 指定结构，实际类从 `deepsdf.networks.*` 动态导入。典型调用方式见：
+encoder 和 DeepSDF decoder 的边界很明确：
 
-- [`train.py`](/home/tianqi/corepp2/train.py)
-- [`test.py`](/home/tianqi/corepp2/test.py)
-- [`reconstruct_deep_sdf.py`](/home/tianqi/corepp2/reconstruct_deep_sdf.py)
+```text
+encoder 预测 latent
+decoder 根据 latent + xyz 查询 SDF
+mesh 由 decoder 生成
+```
 
-这部分仍然遵循标准 DeepSDF 形式：
+当前草莓实验使用的 decoder 配置来自：
 
-- 输入：`[latent_code, x, y, z]`
-- 输出：单个 SDF 标量
+- [`deepsdf/experiments/20260331_dataset/specs.json`](/home/tianqi/corepp2/deepsdf/experiments/20260331_dataset/specs.json)
+- [`deepsdf/networks/deep_sdf_decoder.py`](/home/tianqi/corepp2/deepsdf/networks/deep_sdf_decoder.py)
 
-外部编码器和 DeepSDF 的边界很明确：编码器只预测 latent，不直接输出网格。
+核心参数：
 
-## 3. PointNeXt 分支的详细实现与参数
+```json
+{
+  "NetworkArch": "deep_sdf_decoder",
+  "CodeLength": 32,
+  "NetworkSpecs": {
+    "dims": [512, 512, 512, 512, 512, 512, 512, 512],
+    "dropout": [0, 1, 2, 3, 4, 5, 6, 7],
+    "dropout_prob": 0.2,
+    "norm_layers": [0, 1, 2, 3, 4, 5, 6, 7],
+    "latent_in": [4],
+    "xyz_in_all": false,
+    "use_tanh": false,
+    "latent_dropout": false,
+    "weight_norm": true
+  }
+}
+```
 
-如果配置 `encoder == "pointnext"`，系统将实例化 [`networks/pointnext.py`](/home/tianqi/corepp2/networks/pointnext.py) 中的 `PointNeXtEncoder`。该实现参考了 PointNeXt 论文，但针对当前的潜变量预测任务进行了轻量化定制。
+因此单次 SDF 查询的输入维度是：
 
-### 3.1 核心参数配置
+```text
+latent_code: 32
+xyz:          3
+input:       35 = 32 + 3
+```
 
-默认参数如下（若配置文件中未指定则生效）：
+网络展开后是一个 8 层宽度为 512 的 MLP，最后输出 1 个 SDF 标量。因为 `latent_in=[4]`，第 4 个 hidden layer 前会把原始 `[latent, xyz]` 再拼接一次，形成 skip connection。
 
-- **k 值 (nsample)**: `24`。在 SA 层的局部邻域聚合中使用 KNN 搜索。
-- **分组策略**: 仅使用 KNN，未启用基于半径的 Ball Query (Radius=None)。
-- **宽度 (width/C)**: `48`。介于标准 PointNext-S (C=32) 和 PointNext-B (C=64) 之间，提供了平衡的计算量与特征精度。
-- **输入点数 (N)**: 默认为 `2048`（由 `input_size` 配置项控制）。
+具体维度：
 
-### 3.2 网络结构表 (Encoder Details)
+```text
+input z,x,y,z: 35
+  -> lin0: 35  -> 512, WeightNorm, ReLU, Dropout(0.2)
+  -> lin1: 512 -> 512, WeightNorm, ReLU, Dropout(0.2)
+  -> lin2: 512 -> 512, WeightNorm, ReLU, Dropout(0.2)
+  -> lin3: 512 -> 477, WeightNorm, ReLU, Dropout(0.2)
+  -> concat original input: 477 + 35 = 512
+  -> lin4: 512 -> 512, WeightNorm, ReLU, Dropout(0.2)
+  -> lin5: 512 -> 512, WeightNorm, ReLU, Dropout(0.2)
+  -> lin6: 512 -> 512, WeightNorm, ReLU, Dropout(0.2)
+  -> lin7: 512 -> 512, WeightNorm, ReLU, Dropout(0.2)
+  -> lin8: 512 -> 1
+  -> final Tanh
+```
 
-| 阶段 (Stage) | 模块 (Module) | 关键参数 | 输入 $\to$ 输出通道 | 输出点数 | 备注 |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| **Input** | 点云数据 | - | - | 2048 | 坐标 (X, Y, Z) |
-| **Stem** | Shared MLP | width=48 | 3 $\to$ 48 | 2048 | 2x (Conv1d+GN+ReLU) |
-| **SA1** | Set Abstraction | npoint=512, k=24 | 48 $\to$ 96 | 512 | FPS 采样 + KNN 聚合 |
-| (Residual) | Stage 1 Blocks | expansion=4 | 96 $\to$ 96 | 512 | 2x InvResMLP |
-| **SA2** | Set Abstraction | npoint=128, k=24 | 96 $\to$ 192 | 128 | FPS 采样 + KNN 聚合 |
-| (Residual) | Stage 2 Blocks | expansion=4 | 192 $\to$ 192 | 128 | 2x InvResMLP |
-| **Global** | Pooled Features | - | 192 $\to$ 384 | 1 | Concat(GlobalMax, GlobalAvg) |
-| **Head** | Output MLP | - | 384 $\to$ latent_size | 1 | 384 $\to$ 512 $\to$ 256 $\to$ out |
+这里 `lin3` 输出 477 的原因是源码中当下一层在 `latent_in` 中时，会设置：
 
-### 3.3 关键可配参数 (JSON Config)
+```text
+out_dim = next_dim - input_dim = 512 - 35 = 477
+```
 
-- `pointnext_width`: 控制 Stem 和后续阶段的基础通道数 (默认 48)。
-- `pointnext_nsample`: 控制 KNN 聚合时的邻居数量 (默认 24)。
-- `pointnext_dropout`: Head 部分的随机失活率 (默认 0.05)。
+随后 forward 到 `layer=4` 前执行：
 
+```text
+x = concat(x, original_input)
+```
 
-## 4. 数据表示与归一化
+使得进入 `lin4` 的维度重新变为 512。这个结构来自 DeepSDF 常用的 latent skip MLP，用于让中层仍能直接访问 shape latent 和查询点坐标。
 
-### 4.1 纯点云训练/测试数据
+需要注意：
 
-[`dataloaders/pointcloud_dataset.py`](/home/tianqi/corepp2/dataloaders/pointcloud_dataset.py) 当前做法是：
+- `weight_norm=true` 时，`norm_layers` 实际表现为对对应 `Linear` 使用 WeightNorm，而不是额外的 LayerNorm。
+- `latent_dropout=false`，所以输入 latent 本身不做 dropout。
+- `use_tanh=false` 只是不在最后一层线性输出后启用该分支的 tanh；当前实现最后仍执行 `self.th(x)`，因此输出 SDF 会经过 final `Tanh`。
+- `xyz_in_all=false`，所以 xyz 不会在每一层都重复拼接，只在输入层和 `latent_in` skip 中出现。
 
-1. 从 `complete/` 或 `partial/` 目录读取 `.ply`。
-2. 采样或重复采样到固定点数 `pad_size`。
-3. 对点云做 zero-centering，即减去整云几何中心。
-4. 当前默认 `scale = 1.0`，不会再把点云整体缩放到单位球。
-5. 根据采样点计算带 margin 的局部 `bbox`，供部分 3D loss 或后处理使用。
-6. 如果能通过 `mapping.json` 将 partial 文件映射回 `ground_truth.csv` 中的 complete 文件，则返回 `volume_ml` 作为体积监督标签。
+DeepSDF 第一阶段训练时，每个训练样本有一个可学习 latent embedding：
 
-这意味着当前纯点云主路径更偏向“中心对齐，但保留原始尺度”。
+```text
+sample_id -> latent embedding z_i, shape [32]
+SDF sample point p_j, shape [3]
+concat [z_i, p_j], shape [35]
+decoder([z_i, p_j]) -> predicted SDF
+```
 
-### 4.2 自定义测试目录
+训练目标是 SDF regression，并带 latent code 正则：
 
-[`test.py`](/home/tianqi/corepp2/test.py) 里的 `CustomTestDataset` 支持直接读取一个 `.ply` 文件或一个目录下的所有 `.ply`。这个分支和 `PointCloudDataset` 不完全一样：
+```text
+CodeRegularization = true
+CodeRegularizationLambda = 0.0001
+CodeBound = 1.0
+ClampingDistance = 0.1
+SamplesPerScene = 16384
+ScenesPerBatch = 64
+```
 
-- 会把每个样本移动到自身质心；
-- 会按当前样本最大半径归一化到局部单位球；
-- 会返回对应的 `center` 和 `scale`。
+第二阶段训练 encoder 时，decoder 的角色不同：decoder 参数固定，encoder 学习预测一个可以让该 decoder 生成正确草莓形状的 `z`。
 
-这条路径主要用于脱离原始训练集组织方式的快速推理。
+## 4. PointNeXt 分支
 
-### 4.3 RGB-D 数据
+如果配置：
 
-[`dataloaders/cameralaser_w_masks.py`](/home/tianqi/corepp2/dataloaders/cameralaser_w_masks.py) 会负责：
+```json
+"encoder": "pointnext"
+```
 
-- 读取 RGB、Depth、Mask 和相机内参；
-- 根据 mask 和深度分布裁剪目标；
-- 构造 partial point cloud；
-- 在需要时准备 SDF supervision 所需的目标数据。
+系统会实例化 [`networks/pointnext.py`](/home/tianqi/corepp2/networks/pointnext.py) 中的 `PointNeXtEncoder`。
 
-这个模块比纯点云分支复杂得多，仍然保留着原始 CoRe++ 的很多图像侧逻辑。
+默认核心参数：
 
-## 5. 训练架构
+- `pointnext_width`: 默认 `48`
+- `pointnext_nsample`: 默认 `24`
+- `pointnext_dropout`: 默认 `0.05`
+- `input_size`: 当前为 `2048`
+- `latent_size`: 当前来自 DeepSDF `CodeLength=32`
+
+结构概要：
+
+```text
+Input XYZ, N=2048
+  -> Stem Shared MLP, 3 -> 48
+  -> SA1, npoint=512, k=24, 48 -> 96
+  -> InvResMLP blocks
+  -> SA2, npoint=128, k=24, 96 -> 192
+  -> InvResMLP blocks
+  -> Global Max/Avg Pool, 192 -> 384
+  -> Head MLP, 384 -> 512 -> 256 -> latent_size
+```
+
+源码中的实际 forward 维度如下：
+
+```text
+输入 partial_pcd: [B, 2048, 3]
+permute 后进入 encoder: [B, 3, 2048]
+
+xyz = x.transpose(1, 2): [B, 2048, 3]
+
+Stem:
+  SharedMLP1d(3  -> 48): Conv1d(1x1) + GroupNorm + ReLU
+  SharedMLP1d(48 -> 48): Conv1d(1x1) + GroupNorm + ReLU
+  features: [B, 48, 2048]
+
+SA1:
+  FPS 采样 512 个中心点
+  每个中心点 KNN 聚合 24 个邻域点
+  拼接局部坐标差 grouped_xyz 和 grouped_features
+  输入通道 48 + 3 = 51
+  SharedMLP2d(51 -> 96)
+  SharedMLP2d(96 -> 96)
+  邻域 max pooling
+  skip: Conv1d(48 -> 96) + GroupNorm
+  输出 xyz:      [B, 512, 3]
+  输出 features: [B, 96, 512]
+
+Stage1:
+  InvResMLP(96), expansion=4: 96 -> 384 -> 96, residual
+  InvResMLP(96), expansion=4: 96 -> 384 -> 96, residual
+  features: [B, 96, 512]
+
+SA2:
+  FPS 采样 128 个中心点
+  每个中心点 KNN 聚合 24 个邻域点
+  输入通道 96 + 3 = 99
+  SharedMLP2d(99  -> 192)
+  SharedMLP2d(192 -> 192)
+  邻域 max pooling
+  skip: Conv1d(96 -> 192) + GroupNorm
+  输出 xyz:      [B, 128, 3]
+  输出 features: [B, 192, 128]
+
+Stage2:
+  InvResMLP(192), expansion=4: 192 -> 768 -> 192, residual
+  InvResMLP(192), expansion=4: 192 -> 768 -> 192, residual
+  features: [B, 192, 128]
+
+Global pooling:
+  adaptive max pool: [B, 192]
+  adaptive avg pool: [B, 192]
+  concat:            [B, 384]
+
+Head:
+  Linear(384 -> 512, bias=False) + LayerNorm + ReLU + Dropout(0.05)
+  Linear(512 -> 256, bias=False) + LayerNorm + ReLU + Dropout(0.05)
+  Linear(256 -> 32)
+
+输出:
+  pred_latent: [B, 32]
+```
+
+这个 encoder 没有直接输出 mesh，也不直接输出最终体积。它只输出 DeepSDF latent。最终几何完全由：
+
+```text
+pred_latent + DeepSDF decoder + marching cubes
+```
+
+决定。
+
+### 4.1 SetAbstraction 细节
+
+`SetAbstraction` 是 PointNeXt 分支中最关键的降采样模块：
+
+```text
+输入:
+  xyz:      [B, N, 3]
+  features: [B, C, N]
+
+1. farthest_point_sample(xyz, npoint)
+   从 N 个点中用 FPS 选出 npoint 个中心点。
+
+2. knn_point(nsample, xyz, new_xyz)
+   对每个中心点找 nsample 个近邻点。
+
+3. grouped_xyz = grouped_xyz - center_xyz
+   使用局部相对坐标，而不是全局坐标。
+
+4. concat(grouped_xyz, grouped_features)
+   将几何局部偏移和点特征拼接。
+
+5. SharedMLP2d + max over neighborhood
+   得到每个中心点的局部聚合特征。
+
+6. skip(center_features)
+   对中心点原始特征做 1x1 投影，并与聚合特征相加。
+```
+
+因此 PointNeXt encoder 的归纳偏置是：
+
+- FPS 保留覆盖整个草莓表面的代表点。
+- KNN 局部聚合捕捉表面局部几何。
+- 相对坐标让局部形状更稳定。
+- global max/avg pooling 把局部特征汇总成整果 latent。
+
+### 4.2 InvResMLP 细节
+
+`InvResMLP` 是一个 1D residual MLP block：
+
+```text
+x
+  -> Conv1d(C -> 4C, kernel=1, bias=False)
+  -> GroupNorm
+  -> ReLU
+  -> Conv1d(4C -> C, kernel=1, bias=False)
+  -> GroupNorm
+  -> add input x
+  -> ReLU
+```
+
+它不改变点数，也不改变通道数，只在每个 stage 内增强局部特征表达。
+
+## 5. 训练监督
 
 ### 5.1 DeepSDF 训练
 
-[`train_deep_sdf.py`](/home/tianqi/corepp2/train_deep_sdf.py) 基本沿用官方 DeepSDF 训练范式：
+DeepSDF 第一阶段由 [`train_deep_sdf.py`](/home/tianqi/corepp2/train_deep_sdf.py) 完成：
 
-- 学习一个解码器参数集；
-- 同时学习训练样本对应的 latent embeddings；
-- 训练过程中的 checkpoint、optimizer state、latent codes、logs 都落在实验目录下。
+```text
+SDF samples + sample latent embedding -> decoder -> SDF prediction
+```
 
-当前代码中的第一阶段主损失写法与 [`train_deep_sdf.py`](/home/tianqi/corepp2/train_deep_sdf.py) 一致，可写为：
+训练结果包括：
 
-$$
-\mathcal{L}_{\text{stage1}}
-=
-\frac{1}{N}
-\sum_{i=1}^{N}
-\left|
-f_{\theta}(\mathbf{z}_j,\mathbf{x}_i)
--
-s_i
-\right|
-\;+\;
-\mathcal{L}_{\text{latent-reg}}
-$$
+```text
+deepsdf/experiments/20260331_dataset/ModelParameters/100.pth
+deepsdf/experiments/20260331_dataset/LatentCodes/100.pth
+```
+
+### 5.2 Encoder 训练
+
+对于 train split，encoder 直接读取 DeepSDF 训练阶段产生的 latent matrix：
+
+```text
+deepsdf/experiments/20260331_dataset/LatentCodes/100.pth
+```
+
+对于 validation split，使用逐样本 optimized latent：
+
+```text
+deepsdf/experiments/20260331_dataset/Reconstructions/100/Codes/complete/
+```
+
+如果该 validation 目录不存在，运行：
+
+```bash
+/home/tianqi/miniconda3/envs/corepp/bin/python reconstruct_deep_sdf.py \
+    --experiment ./deepsdf/experiments/20260331_dataset \
+    --data ./data/20260331_dataset \
+    --checkpoint_decoder 100 \
+    --split ./deepsdf/experiments/splits/20260331_dataset_val.json
+```
+
+### 5.3 当前总损失
+
+当前有效训练主要由两项组成：
+
+```text
+L = lambda_super * SuperLoss(pred_latent, gt_latent)
+  + lambda_latent_spread * LatentSpreadLoss(pred_latent, gt_latent)
+```
 
 其中：
 
-- $\mathbf{x}_i \in \mathbb{R}^3$ 是采样的空间点；
-- $s_i$ 是该点的 GT SDF；
-- $\mathbf{z}_j$ 是当前训练样本 $j$ 的 latent code；
-- $f_{\theta}(\mathbf{z}_j,\mathbf{x}_i)$ 是 DeepSDF 解码器输出；
-- $N$ 是当前样本使用的 SDF 采样点数。
-
-当前实现里的主重建项是 **L1 SDF 重建损失**，不是 MSE。代码中保留了 `enforce_minmax` 分支用于对 GT 和预测 SDF 做 `torch.clamp`，但 [`train_deep_sdf.py`](/home/tianqi/corepp2/train_deep_sdf.py) 当前把 `enforce_minmax` 固定为 `False`，所以默认训练路径不会执行该截断。
-
-如果在 `specs.json` 中开启 `CodeRegularization`，则还会附加 latent 范数正则：
-
-$$
-\mathcal{L}_{\text{latent-reg}}
-=
-\lambda_{\text{code}}
-\cdot
-\min\!\left(1, \frac{e}{100}\right)
-\cdot
-\frac{1}{N}
-\sum_{i=1}^{N}
-\left\|
-\mathbf{z}_j
-\right\|_2
-$$
-
-其中 $e$ 是当前 epoch，代码里用 `min(1, epoch / 100)` 做 warm-up。
-
-如果开启球面正则 `do_code_regularization_sphere`，则正则项替换为：
-
-$$
-\mathcal{L}_{\text{sphere-reg}}
-=
-\lambda_{\text{code}}
-\cdot
-\min\!\left(1, \frac{e}{100}\right)
-\cdot
-\frac{1}{N}
-\sum_{i=1}^{N}
-\left|
-1 - \lVert \mathbf{z}_j \rVert_2
-\right|
-$$
-
-### 5.2 外部编码器训练
-
-[`train.py`](/home/tianqi/corepp2/train.py) 的核心目标是让编码器输出的 latent 接近 DeepSDF latent space。
-
-训练时先根据 `specs.json` 加载一个预训练解码器，然后再训练编码器。当前实现里，解码器是否一起更新由命令行 `--decoder` 决定：
-
-- 默认只更新编码器；
-- 指定 `--decoder` 时同时更新编码器和解码器参数。
-
-### 5.3 当前可叠加的损失
-
-`train.py` 中总损失是若干可选项的加和，是否启用由配置决定：
-
-- `SuperLoss`
-  使用 MSE 对齐编码器预测 latent 和 GT latent。
-- `AttRepLoss`
-  在开启 `contrastive` 时按 `fruit_id` 做吸引/分离。
-- `KLDivLoss`
-  在开启 `kl_divergence` 时约束 batch latent 分布。
-- `RegLatentLoss`
-  约束 latent 向量范数。
-- `LatentSpreadLoss`
-  在开启 `supervised_3d` 且 `lambda_latent_spread > 0` 时，对齐预测 latent 与 GT latent 的逐维标准差，抑制 batch 内 latent collapse。
-- `VolumeLoss`
-  在 `lambda_volume > 0` 且样本包含 `volume_ml` 时，用 `volume_head(latent)` 直接回归体积。
-- `SDFLoss`
-  在开启 `3D_loss` 时，把编码器输出 latent 与规则体素网格拼接后送入解码器，直接监督 SDF 场。
-
-其中最常见的主监督仍然是 `supervised_3d=True` 时的 latent 回归；当前草莓配置中额外叠加了 latent 分布展开和体积回归监督，用来减少预测 latent 与最终体积都向均值收缩的问题。
-
-第二阶段的总损失可统一写成：
-
-$$
-\mathcal{L}_{\text{stage2}}
-=
-\lambda_{\text{att}} \mathcal{L}_{\text{att}}
-+
-\lambda_{\text{kl}} \mathcal{L}_{\text{kl}}
-+
-\lambda_{\text{super}} \mathcal{L}_{\text{super}}
-+
-\lambda_{\text{spread}} \mathcal{L}_{\text{spread}}
-+
-\lambda_{\text{volume}} \mathcal{L}_{\text{volume}}
-+
-\mathcal{L}_{\text{reg}}
-+
-\lambda_{\text{sdf}} \mathcal{L}_{\text{sdf}}
-$$
-
-其中只有被配置启用的项才会实际参与优化。
-
-1. `SuperLoss`：latent 监督回归
-
-$$
-\mathcal{L}_{\text{super}}
-=
-\frac{1}{B}
-\sum_{b=1}^{B}
-\left\|
-\hat{\mathbf{z}}_b - \mathbf{z}^{*}_b
-\right\|_2^2
-$$
-
-这里 $\hat{\mathbf{z}}_b$ 是编码器预测 latent，$\mathbf{z}^{*}_b$ 是来自第一阶段 DeepSDF 的 GT latent。
-
-2. `LatentSpreadLoss`：latent 分布展开约束
-
-该项比较当前 batch 中预测 latent 和 GT latent 的逐维标准差：
-
-$$
-\mathcal{L}_{\text{spread}}
-=
-\frac{1}{D}
-\sum_{d=1}^{D}
-\left(
-\sigma(\hat{\mathbf{z}}_{:,d})
--
-\sigma(\mathbf{z}^{*}_{:,d})
-\right)^2
-$$
-
-它对应 [`loss.py`](/home/tianqi/corepp2/loss.py) 中的 `LatentSpreadLoss`。这不是直接约束单个样本的 latent 取值，而是让一个 batch 内的预测 latent 保留接近 GT latent 的分布宽度，避免编码器把不同大小或不同形状的样本全部压到接近均值的位置。
-
-3. `VolumeLoss`：体积回归监督
-
-当前训练会先从编码器 latent 预测对数体积：
-
-$$
-\hat{u}_b = h_{\phi}(\hat{\mathbf{z}}_b),
-\qquad
-u^{*}_b = \log(1 + v^{*}_b)
-$$
-
-其中 $v^{*}_b$ 是数据集返回的真实毫升体积 `volume_ml`。损失由两部分组成：
-
-$$
-\mathcal{L}_{\text{volume}}
-=
-(1-\alpha)
-\operatorname{SmoothL1}(\hat{u}, u^{*})
-+
-\alpha
-\frac{1}{B}
-\sum_{b=1}^{B}
-\frac{|\operatorname{expm1}(\hat{u}_b)-v^{*}_b|}
-{|v^{*}_b|+\epsilon}
-$$
-
-其中 $\alpha$ 对应配置项 `volume_loss_relative_weight`。第一项在 `log1p(volume_ml)` 空间里做稳定回归，第二项在毫升空间里惩罚相对误差；总项再由 `lambda_volume` 加权加入训练目标。
-
-4. `RegLatentLoss`：latent 单位球约束
-
-$$
-\mathcal{L}_{\text{reg}}
-=
-\lambda_{\text{reg}}
-\cdot
-\frac{1}{B}
-\sum_{b=1}^{B}
-\left|
-1 - \lVert \hat{\mathbf{z}}_b \rVert_2
-\right|
-$$
-
-它对应 [`loss.py`](/home/tianqi/corepp2/loss.py) 中的 `RegLatentLoss`，本质上约束预测 latent 的模长接近 1。
+- `SuperLoss` 是 latent MSE。
+- `LatentSpreadLoss` 对齐预测 latent 和 GT latent 的逐维标准差，防止 batch 内 latent collapse。
 
-5. `SDFLoss`：基于解码器输出的 3D 场监督
+当前禁用：
 
-代码中会先把预测 SDF 截断到 $[-\tau, \tau]$，再只保留有效体素权重不为 0 且位于窄带内的点（`|s| < 1`），最后做对数变换后的 L1 损失：
+```json
+"3D_loss": false,
+"lambda_volume": 0.0
+```
 
-$$
-\tilde{s} = \operatorname{sign}(s)\log(1 + |s|)
-$$
+因此：
 
-$$
-\mathcal{L}_{\text{sdf}}
-=
-\frac{1}{|\Omega|}
-\sum_{i \in \Omega}
-\left|
-\tilde{\hat{s}}_i - \tilde{s}_i
-\right|
-$$
+- 不再用低分辨率 SDF/grid loss 直接训练 encoder。
+- 不再训练 volume head。
+- `pred_volume_ml` 不再作为最终架构输出指标。
 
-其中 $\Omega = \{ i \mid w_i \neq 0,\ |s_i| < 1 \}$，$\hat{s}_i$ 是解码器预测值，$s_i$ 是目标 SDF，$w_i$ 是 TSDF/占据权重。
+## 6. Validation 策略
 
-如果配置 `loss_type == "weighted"`，代码会改用 `SDFLoss_new`。它在同样的窄带和对数变换基础上，额外按 `exp(-alpha * |target|)` 提高近表面 SDF 样本权重，`alpha` 对应配置项 `sdf_alpha`。
+当前 validation 使用和最终 test 一致的 mesh 生成路径：
 
-6. `KLDivLoss`：batch latent 分布匹配
+```text
+encoder latent
+    -> deepsdf.deep_sdf.mesh.create_mesh()
+    -> 输出 .ply
+    -> ConvexHull(vertices).volume
+    -> mesh-volume RMSE
+```
 
-设当前 batch 预测 latent 的经验均值和协方差分别为：
+validation mesh 保存到：
+
+```text
+logs/strawberry/val_output/
+```
 
-$$
-\boldsymbol{\mu}_b = \frac{1}{B}\sum_{i=1}^{B}\hat{\mathbf{z}}_i,
-\qquad
-\Sigma_b = \frac{1}{B}\sum_{i=1}^{B}(\hat{\mathbf{z}}_i-\boldsymbol{\mu}_b)(\hat{\mathbf{z}}_i-\boldsymbol{\mu}_b)^{\top}
-$$
+best checkpoint 优先依据：
 
-则代码中构造两个高斯分布
-$q = \mathcal{N}(\boldsymbol{\mu}_b, \Sigma_b + 0.001I)$
-与
-$p = \mathcal{N}(\boldsymbol{\mu}_{\text{target}}, \Sigma_{\text{target}})$，
-并最小化：
+```text
+Val/mesh_volume_rmse
+```
 
-$$
-\mathcal{L}_{\text{kl}} = D_{\mathrm{KL}}(q \parallel p)
-$$
+原因：单独的 latent MSE 并不能保证 decoder 生成的 mesh 体积正确。
+
+## 7. Test 输出
 
-7. `AttRepLoss`：同类吸引、异类排斥
+测试阶段：
+
+```text
+test.py
+    -> encoder prediction
+    -> deepsdf.deep_sdf.mesh.create_mesh()
+    -> logs/strawberry/output/<frame_id>.ply
+    -> mesh_volume_ml
+```
 
-对 batch 内任意两个 latent，先计算欧氏距离
-$d_{ij} = \lVert \hat{\mathbf{z}}_i - \hat{\mathbf{z}}_j \rVert_2$。
-若二者属于同一 `fruit_id`，则目标标签为 $+1$；否则为 $-1$。代码调用 `HingeEmbeddingLoss(margin=\delta)`，因此该项可写为：
+测试阶段 encoder latent 保存到：
 
-$$
-\mathcal{L}_{\text{att}}
-=
-\sum_{i}\sum_{j}
-\ell_{\text{hinge}}(d_{ij}, y_{ij})
-$$
+```text
+deepsdf/experiments/20260331_dataset/Reconstructions/100/Codes/encoder/
+```
+
+主要输出：
+
+```text
+shape_completion_results.csv
+shape_completion_results_multi_threshold.csv
+```
+
+`shape_completion_results_multi_threshold.csv` 当前列包括：
 
-其中
+```text
+fruit_id
+frame_id
+complete_volume_ml
+mesh_volume_ml
+volume_mae_ml
+volume_rmse_ml
+volume_mape_percent
+volume_r2
+chamfer_distance
+precision / recall / f1
+precision_t*
+recall_t*
+f1_t*
+```
 
-$$
-\ell_{\text{hinge}}(d, y)=
-\begin{cases}
-d, & y=1 \\
-\max(0, \delta - d), & y=-1
-\end{cases}
-$$
+最后一行是整体汇总：
 
-这表示同类样本距离越小越好，异类样本至少要被推开到 margin $\delta$ 之外。
+```text
+fruit_id = SUMMARY
+frame_id = n=<测试样本数>
+```
 
-### 5.4 验证与模型保存
+其中体积误差指标基于：
 
-训练过程每隔 `validation_frequency` 做一次验证。当前验证指标不是直接看网格质量，而是：
+```text
+GT   = complete_volume_ml
+Pred = mesh_volume_ml
+```
 
-- 在验证集上计算预测 latent 与 GT latent 的 MSE；
-- 将其记为 `Mean Validation Latent MSE`；
-- 如果验证样本包含 `volume_ml`，同时计算 `Mean Validation Volume Loss`；
-- 如果 latent MSE 与 volume loss 都是有限值，best model 选择用 `latent MSE + lambda_volume * volume loss`；否则退化为只用 latent MSE。
+## 8. 运行命令
 
-模型保存由 [`utils.py`](/home/tianqi/corepp2/utils.py) 的 `save_model()` 负责，存储内容包括：
-
-- `encoder_state_dict`
-- `decoder_state_dict`
-- `volume_head_state_dict`
-- `optimizer_state_dict`
-- `epoch`
-- `loss`
-
-## 6. 推理与重建架构
-
-### 6.1 DeepSDF 潜变量重建
-
-[`reconstruct_deep_sdf.py`](/home/tianqi/corepp2/reconstruct_deep_sdf.py) 使用标准 latent optimization：
-
-1. 固定训练好的 DeepSDF 解码器；
-2. 为每个测试样本初始化 latent；
-3. 通过 SDF 样本的重建误差迭代优化 latent；
-4. 输出重建网格和对应 latent code。
-
-这一步的主要作用是：
-
-- 为 DeepSDF 本身做 reconstruction benchmark；
-- 为后续编码器训练提供样本级 latent 监督。
-
-### 6.2 编码器直接推理
-
-[`test.py`](/home/tianqi/corepp2/test.py) 的推理流程是：
-
-1. 读取配置和 checkpoint。
-2. 实例化编码器、DeepSDF 解码器与 `volume_head`。
-3. 编码器输出 latent。
-4. 如果 checkpoint 包含 `volume_head_state_dict`，则从 `volume_head(latent)` 预测 `pred_volume_ml`；如果配置 `calibrate_volume_head_on_val=True`，还会先用验证集拟合一个线性校准。
-5. 调用 `deepsdf.deep_sdf.mesh.create_mesh()` 生成三角网格。
-6. 把 latent 另外保存为 `.pth`，便于后续分析。
-7. 计算体积和几何指标。
-8. 将结果持续写入 CSV。
-
-当前实现中，网格默认输出到固定目录：
-
-- `/home/tianqi/corepp2/logs/strawberry/output`
-
-这属于脚本级硬编码，不是通用工作区抽象。
-
-网格生成的实际实现位于 [`deepsdf/deep_sdf/mesh.py`](/home/tianqi/corepp2/deepsdf/deep_sdf/mesh.py)。当前 `create_mesh()` 使用固定采样范围 `[-3.0, 3.0]^3`，通过 `skimage.measure.marching_cubes()` 提取零等值面；写出 PLY 前会尝试过滤明显贴近采样边界的伪连通域，并执行 Laplacian 平滑。
-
-需要区分两种体积输出：
-
-- `pred_volume_ml`
-  来自 `volume_head` 对 latent 的直接回归，属于学习到的体积估计。
-- `mesh_volume_ml`
-  来自生成网格的几何体积计算，属于重建几何后的后处理估计。
-
-## 7. 体积与评估指标
-
-### 7.1 体积估计
-
-当前体积估计在 [`test.py`](/home/tianqi/corepp2/test.py) 中由 `_compute_volume_ml()` 完成：
-
-1. 先清理重复点、重复面和退化面；
-2. 直接对当前网格顶点计算 `ConvexHull(vertices).volume`；
-3. 按 `volume_unit` 把结果解释为 `cm`、`mm` 或 `m` 对应的体积单位；
-4. 默认情况下再乘以 `volume_scale_factor`，其默认值是 `1.0`。
-
-需要特别说明：
-
-- 当前 CSV 中同时可能包含 `pred_volume_ml` 和 `mesh_volume_ml`；前者来自训练时新增的体积回归头，后者来自网格几何计算。
-- `_compute_volume_ml()` 当前不调用 `mesh.get_volume()`，因此不会根据网格是否 watertight 切换计算方式。
-- 当前实现不再做“线性归一化尺度的三次方换算”这一类后处理描述。
-- 代码里保留了 `volume_scale_factor` 这个可选配置项，但默认值是 `1.0`。
-- 因此按当前默认路径，体积就是直接基于生成网格估计出来的体积。
-
-### 7.2 几何指标
-
-`test.py` 当前会输出两份表：
-
-- `shape_completion_results.csv`
-- `shape_completion_results_multi_threshold.csv`
-
-评估时的关键逻辑是：
-
-1. 先把 GT 点云和预测网格临时平移到 GT 质心。
-2. 再按 GT 的最大半径缩放到局部单位球。
-3. 在这个归一化空间里计算 Chamfer Distance 与多阈值 Precision/Recall/F1。
-
-默认支持的阈值集合来自配置：
-
-- `metric_threshold`
-- `metric_thresholds`
-
-这比旧版只计算单个阈值的流程更完整。
-
-## 8. 当前架构的几个关键结论
-
-基于现有代码，可以把仓库理解为下面这个结构：
-
-- DeepSDF 仍然是唯一的隐式解码后端。
-- 外部编码器已经不是单一实现，而是一个可切换的 encoder family。
-- 纯点云路径已经是一等公民，不再只是 RGB-D 流程的附属。
-- 训练的主监督对象是 latent，对网格的监督目前是可选附加项。
-- 训练阶段已经新增了从 latent 直接回归体积的 `volume_head`，体积不再只依赖测试阶段的网格后处理估计。
-- 测试阶段的体积与指标计算已经集中在 `test.py`，并且比旧文档描述更贴近“直接从生成网格估计”。
-
-如果后续还要继续维护这份文档，建议优先以以下文件为准：
-
-- [`train.py`](/home/tianqi/corepp2/train.py)
-- [`test.py`](/home/tianqi/corepp2/test.py)
-- [`dataloaders/pointcloud_dataset.py`](/home/tianqi/corepp2/dataloaders/pointcloud_dataset.py)
-- [`networks/pointnext.py`](/home/tianqi/corepp2/networks/pointnext.py)
-- [`utils.py`](/home/tianqi/corepp2/utils.py)
+训练 encoder：
+
+```bash
+/home/tianqi/miniconda3/envs/corepp/bin/python train.py \
+    --cfg ./configs/strawberry.json \
+    --experiment ./deepsdf/experiments/20260331_dataset \
+    --checkpoint_decoder 100
+```
+
+运行测试：
+
+```bash
+/home/tianqi/miniconda3/envs/corepp/bin/python test.py \
+    --cfg ./configs/strawberry.json \
+    --experiment ./deepsdf/experiments/20260331_dataset \
+    --checkpoint_decoder 100
+```
+
+运行 D405 unseen 推理：
+
+```bash
+/home/tianqi/miniconda3/envs/corepp/bin/python test_unseen_data.py \
+    --cfg ./configs/strawberry.json \
+    --experiment ./deepsdf/experiments/20260331_dataset \
+    --checkpoint_decoder 100 \
+    --input_dir ./data/D405_data \
+    --output_dir ./unseen_output \
+    --input_unit m
+```
+
+## 9. 最新验证结果
+
+最新 test set 汇总：
+
+```text
+complete_volume_ml:
+  mean = 19.86
+  std  = 3.87
+  min  = 13.71
+  max  = 30.36
+
+mesh_volume_ml:
+  mean = 20.28
+  std  = 4.37
+  min  = 11.49
+  max  = 30.40
+
+corr(mesh_volume_ml, complete_volume_ml) = 0.963
+```
+
+体积误差：
+
+```text
+volume_mae_ml        = 1.062604
+volume_rmse_ml       = 1.281944
+volume_mape_percent  = 5.621
+volume_r2            = 0.8886
+```
+
+几何指标：
+
+```text
+chamfer_distance mean = 0.0376
+f1_t0p05 mean        = 72.59
+```
+
+validation split：
+
+```text
+val mesh-volume corr = 0.954
+val mesh-volume RMSE = 1.25 mL
+```
+
+latest encoder latent distribution：
+
+```text
+encoder latent norm mean/std = 0.824 / 0.113
+encoder latent total variance = 0.566
+```
+
+参考分布：
+
+```text
+DeepSDF train latent norm mean/std = 0.931 / 0.065
+DeepSDF train latent total variance = 0.752
+
+complete optimized latent norm mean/std = 1.492 / 0.204
+complete optimized latent total variance = 1.277
+```
+
+说明当前 encoder latent 已接近 DeepSDF latent manifold，并且不再严重坍塌。
+
+## 10. 实用备注
+
+- 不要重新启用 `lambda_volume`，除非 volume head 和 decoder mesh geometry 重新绑定。
+- 不要只用 validation latent MSE 选择 checkpoint；必须保留 mesh-volume validation。
+- 如果体积坍塌再次出现，检查：
+  - `Debug/Train/LatentNormMean`
+  - `Debug/Train/TargetLatentNormMean`
+  - test 后 encoder latent total variance
+  - `corr(mesh_volume_ml, complete_volume_ml)`
+- D405 unseen 数据是 partial/domain gap。当前已修复尺度放大问题，但若要提高 D405 样本间差异，需要 partial 风格训练或微调。

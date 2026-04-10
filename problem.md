@@ -392,3 +392,214 @@ corr(mesh_volume_ml, complete_volume_ml)
 
 当前 `lambda_latent_spread=5.0` 是已验证有效的基线。
 
+## 附加问题：D405 unseen 数据体积被放大到数百 mL
+
+### 问题现象
+
+使用：
+
+```text
+test_unseen_data.py
+```
+
+对 D405 采集的 unseen 点云进行测试时，输出文件：
+
+```text
+unseen_output/unseen_results.csv
+```
+
+中的 `mesh_volume_ml` 一开始明显偏大：
+
+```text
+D405_0108  mesh_volume_ml = 268.26 mL
+D405_0109  mesh_volume_ml = 265.24 mL
+D405_0110  mesh_volume_ml = 309.15 mL
+D405_0111  mesh_volume_ml = 338.86 mL
+D405_0112  mesh_volume_ml = 328.84 mL
+```
+
+这个结果和训练/测试集草莓体积范围明显不符。当前训练数据中的草莓体积大多在：
+
+```text
+约 14 - 30 mL
+```
+
+因此该问题不是普通误差，而是尺度处理存在数量级问题。
+
+### D405 原始点云尺度检查
+
+D405 点云默认按 `input_unit=m` 读取，并转换为 cm：
+
+```text
+points_cm = points_m * 100
+```
+
+转换后，D405 原始点云 bbox 和凸包体积大约为：
+
+```text
+D405_0108 bbox ~= [3.48, 4.17, 1.23] cm, hull ~= 7.87 mL
+D405_0109 bbox ~= [3.48, 4.13, 1.28] cm, hull ~= 7.63 mL
+D405_0110 bbox ~= [3.49, 4.18, 1.53] cm, hull ~= 8.33 mL
+D405_0111 bbox ~= [3.38, 3.98, 1.85] cm, hull ~= 9.49 mL
+D405_0112 bbox ~= [3.35, 4.10, 1.84] cm, hull ~= 10.66 mL
+```
+
+这说明 D405 点云本身并不是数百 mL 的物体。
+
+### 根因
+
+问题出在 `test_unseen_data.py` 的预处理和当前有效训练/测试流程不一致。
+
+旧版 `test_unseen_data.py` 中，unseen 点云先被中心化并归一化到单位球：
+
+```python
+center = sampled_points.mean(axis=0)
+sampled_points = sampled_points - center
+scale = max(norm(sampled_points))
+sampled_points = sampled_points / scale
+```
+
+随后 decoder 生成 mesh 后，又把 mesh 乘回 `scale`：
+
+```python
+mesh = _restore_mesh_to_physical_scale(mesh, center_cm=center_cm, scale_cm=scale_cm)
+```
+
+体积会随长度尺度按三次方变化，因此该操作会把体积乘以：
+
+```text
+scale^3
+```
+
+D405 的 `scale` 大约为：
+
+```text
+2.2 - 2.4 cm
+```
+
+所以：
+
+```text
+scale^3 ~= 10 - 14
+```
+
+这正好解释了为什么输出体积从合理的二十几 mL 被放大到二三百 mL。
+
+实测：
+
+```text
+D405_0108 reported = 268.26 mL, scale^3 ~= 11.11, reported / scale^3 ~= 24.15
+D405_0109 reported = 265.24 mL, scale^3 ~= 10.64, reported / scale^3 ~= 24.92
+D405_0110 reported = 309.15 mL, scale^3 ~= 11.73, reported / scale^3 ~= 26.37
+D405_0111 reported = 338.86 mL, scale^3 ~= 13.83, reported / scale^3 ~= 24.51
+D405_0112 reported = 328.84 mL, scale^3 ~= 13.57, reported / scale^3 ~= 24.23
+```
+
+说明 decoder 实际生成的是约 `24 - 26 mL` 的 mesh，但脚本额外乘回了 `scale^3`，导致最终体积被放大。
+
+### 为什么这和当前有效架构不一致
+
+当前有效的 `PointCloudDataset` 训练预处理只做中心化，不做单位球缩放：
+
+```python
+center = np.mean(points, axis=0)
+sampled_points = sampled_points - center
+scale = 1.0
+```
+
+当前有效的 `test.py` 也不对 decoder mesh 乘回样本级 `scale`。
+
+因此，`test_unseen_data.py` 中的：
+
+```text
+点云 / scale -> encoder -> decoder mesh * scale
+```
+
+和最终有效架构不一致，是造成 D405 unseen 体积异常的直接原因。
+
+### 修复方法
+
+已将 `test_unseen_data.py` 改为和训练/`test.py` 一致：
+
+1. 保留单位转换，例如 D405 默认 `m -> cm`：
+
+```text
+unit_scale_to_cm = 100.0
+```
+
+2. 只做中心化，不做单位球缩放：
+
+```python
+center = points.mean(axis=0).astype(np.float32)
+sampled_points = sampled_points - center
+scale = 1.0
+```
+
+3. decoder mesh 生成后不再乘回 `scale`：
+
+```python
+# Translation is unnecessary for volume and scale is 1.
+```
+
+### 修复后结果
+
+重新运行：
+
+```bash
+/home/tianqi/miniconda3/envs/corepp/bin/python test_unseen_data.py \
+    --cfg ./configs/strawberry.json \
+    --experiment ./deepsdf/experiments/20260331_dataset \
+    --checkpoint_decoder 100 \
+    --input_dir ./data/D405_data \
+    --output_dir ./unseen_output \
+    --input_unit m
+```
+
+新的结果为：
+
+```text
+D405_0108  mesh_volume_ml = 24.610096
+D405_0109  mesh_volume_ml = 25.399787
+D405_0110  mesh_volume_ml = 25.587764
+D405_0111  mesh_volume_ml = 24.833087
+D405_0112  mesh_volume_ml = 24.877670
+```
+
+结果已经从 `260 - 340 mL` 回到训练数据合理量级。
+
+### 剩余问题：D405 是 partial/domain gap
+
+虽然尺度 bug 已修复，但 D405 结果仍然比较接近，原因是 D405 点云是实际采集的残缺/单视角点云，和当前训练数据分布不同。
+
+D405 点云的 z 厚度只有：
+
+```text
+约 1.2 - 1.9 cm
+```
+
+而训练集完整草莓常见 bbox 例如：
+
+```text
+00006 range [3.38, 3.94, 3.28], hull 20.23 mL
+00203 range [2.99, 3.27, 3.15], hull 13.71 mL
+00603 range [4.54, 4.36, 3.56], hull 31.06 mL
+```
+
+因此 D405 输入明显更像 partial surface，而当前 encoder 主要用完整点云训练。
+
+latent 分布也显示 D405 unseen 输入会让 encoder 输出更靠近均值：
+
+```text
+unseen latent norm mean/std = 0.559 / 0.023
+unseen latent total variance = 0.087
+
+test encoder latent norm mean/std = 0.824 / 0.113
+test encoder latent total variance = 0.566
+```
+
+这说明 D405 unseen 输入仍存在 domain gap。当前修复解决了体积数量级错误，但如果需要 D405 样本之间有更精细的体积差异，需要进一步：
+
+- 用 D405 风格的 partial 点云训练或微调 encoder；
+- 在训练集中加入模拟单视角/残缺点云；
+- 使用 complete/partial 配对监督；
+- 或为 D405 数据单独做 test-time latent optimization。

@@ -148,3 +148,10 @@ python test.py \
 推理结果会自动作为行数据追加到当前主目录下的运行报告中：
 ✅ **报告位置：** `./shape_completion_results.csv`
 在这个输出表中，主要关注 `mesh_volume_ml` 列，它是基于计算出几何物体的体积（Volume）进而估算出的真实草莓大小。
+
+python test_unseen_data.py \
+    --cfg ./configs/strawberry.json \
+    --experiment ./deepsdf/experiments/20260331_dataset \
+    --checkpoint_decoder 100 
+
+

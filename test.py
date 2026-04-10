@@ -308,7 +308,6 @@ def main_function(decoder, pretrain, cfg, latent_size, test_data_dir=None):
     columns = ['fruit_id',
                 'frame_id',
                 'complete_volume_ml',
-                'pred_volume_ml',
                 'mesh_volume_ml',
                 'volume_mae_ml',
                 'volume_rmse_ml',
@@ -501,12 +500,6 @@ def main_function(decoder, pretrain, cfg, latent_size, test_data_dir=None):
                 encoder_input = item['partial_pcd'].permute(0, 2, 1).to(device) ## be aware: the current partial pcd is not registered to the target pcd!
 
             latent = encoder(encoder_input)
-            if volume_head_enabled:
-                pred_volume_ml = torch.expm1(volume_head(latent)).item()
-                if use_volume_head_calibration:
-                    pred_volume_ml = max(0.0, float(pred_volume_ml * volume_head_calibration_coeffs[0] + volume_head_calibration_coeffs[1]))
-            else:
-                pred_volume_ml = float('nan')
 
             # save the latent vector for further inspection
             latent_save = latent.detach().to('cpu').squeeze()
@@ -567,7 +560,6 @@ def main_function(decoder, pretrain, cfg, latent_size, test_data_dir=None):
                     'fruit_id': item['fruit_id'][0],
                     'frame_id': frame_id,
                     'complete_volume_ml': round(complete_volume_ml, 6) if complete_volume_ml is not None else np.nan,
-                    'pred_volume_ml': round(pred_volume_ml, 6) if np.isfinite(pred_volume_ml) else np.nan,
                     'mesh_volume_ml': round(mesh_volume_ml, 6),
                     'chamfer_distance': 0.0,
                     'precision': 0.0,
@@ -621,7 +613,6 @@ def main_function(decoder, pretrain, cfg, latent_size, test_data_dir=None):
                 'fruit_id': item['fruit_id'][0],
                 'frame_id': frame_id,
                 'complete_volume_ml': round(complete_volume_ml, 6) if complete_volume_ml is not None else np.nan,
-                'pred_volume_ml': round(pred_volume_ml, 6) if np.isfinite(pred_volume_ml) else np.nan,
                 'mesh_volume_ml': round(mesh_volume_ml, 6),
                 'chamfer_distance': round(chamfer_dist_value, 6),
                 'precision': round(prec, 1),

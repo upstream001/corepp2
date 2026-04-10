@@ -78,12 +78,9 @@ class UnseenPointCloudDataset(torch.utils.data.Dataset):
             replace = num_points < self.pad_size
             choice = np.random.choice(num_points, size=self.pad_size, replace=replace)
             sampled_points = points[choice, :].astype(np.float32)
-            center = sampled_points.mean(axis=0)
+            center = points.mean(axis=0).astype(np.float32)
             sampled_points = sampled_points - center
-            scale = float(np.max(np.linalg.norm(sampled_points, axis=1)))
-            if scale == 0:
-                scale = 1.0
-            sampled_points = sampled_points / scale
+            scale = 1.0
 
         item = {
             'fruit_id': frame_id,
@@ -243,10 +240,8 @@ def main():
                 mesh_path = mesh_prefix.with_suffix('.ply')
                 mesh = o3d.io.read_triangle_mesh(str(mesh_path))
                 mesh.compute_vertex_normals()
-                center_cm = item['center'][0].cpu().numpy()
-                scale_cm = item['scale'].item()
-                mesh = _restore_mesh_to_physical_scale(mesh, center_cm=center_cm, scale_cm=scale_cm)
-                mesh.compute_vertex_normals()
+                # Keep the mesh in the same centered physical coordinate frame used by
+                # training/test.py. Translation is unnecessary for volume and scale is 1.
                 o3d.io.write_triangle_mesh(str(mesh_path), mesh, write_ascii=False)
                 mesh_volume_ml = _compute_volume_ml(mesh, unit=volume_unit) * volume_scale_factor
             except Exception as exc:
