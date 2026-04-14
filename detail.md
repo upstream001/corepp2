@@ -326,3 +326,826 @@ Chamfer / Precision / Recall / F1
 - 当前体积用凸包估计，适合草莓这类近似凸形物体；如果物体有明显凹陷，凸包体积会偏大。
 - 如果输入点云尺度和 DeepSDF 训练尺度不一致，最后 mesh 体积会系统性偏差。
 
+## 11. PointNeXt encoder 当前详细架构
+
+当前最终架构中使用的 encoder 是：
+
+- [`networks/pointnext.py`](/home/tianqi/corepp2/networks/pointnext.py)
+- `PointNeXtEncoder`
+
+它的任务不是直接预测 mesh，也不是直接预测体积，而是把输入点云编码成 DeepSDF latent：
+
+```text
+输入 partial/complete point cloud
+    -> PointNeXtEncoder
+    -> pred_latent, shape [B, 32]
+    -> DeepSDF decoder
+```
+
+当前默认参数来自 `build_pointnext_encoder()`：
+
+```text
+in_channels = 3
+out_channels = latent_size = 32
+width = pointnext_width = 48
+nsample = pointnext_nsample = 24
+dropout = pointnext_dropout = 0.05
+```
+
+当前输入点数来自配置：
+
+```text
+input_size = 2048
+```
+
+因此输入张量形状是：
+
+```text
+DataLoader partial_pcd: [B, 2048, 3]
+train.py/test.py permute 后: [B, 3, 2048]
+```
+
+## 12. PointNeXt 总体层级
+
+当前 PointNeXt encoder 的总结构是：
+
+```text
+Input [B, 3, 2048]
+  -> Stem
+       SharedMLP1d(3  -> 48)
+       SharedMLP1d(48 -> 48)
+  -> SA1
+       FPS: 2048 -> 512 points
+       KNN: k=24
+       SharedMLP2d(48+3 -> 96)
+       SharedMLP2d(96 -> 96)
+       max over local neighborhood
+       skip Conv1d(48 -> 96)
+  -> Stage1
+       InvResMLP(96), expansion=4
+       InvResMLP(96), expansion=4
+  -> SA2
+       FPS: 512 -> 128 points
+       KNN: k=24
+       SharedMLP2d(96+3 -> 192)
+       SharedMLP2d(192 -> 192)
+       max over local neighborhood
+       skip Conv1d(96 -> 192)
+  -> Stage2
+       InvResMLP(192), expansion=4
+       InvResMLP(192), expansion=4
+  -> Global pooling
+       adaptive max pool: [B, 192]
+       adaptive avg pool: [B, 192]
+       concat: [B, 384]
+  -> Head
+       Linear(384 -> 512)
+       LayerNorm(512)
+       ReLU
+       Dropout(0.05)
+       Linear(512 -> 256)
+       LayerNorm(256)
+       ReLU
+       Dropout(0.05)
+       Linear(256 -> 32)
+  -> pred_latent [B, 32]
+```
+
+## 13. 基础模块
+
+### 13.1 GroupNorm 规则
+
+源码中的 `group_norm(channels)` 会自动选择不超过 8 的最大可整除 group 数：
+
+```text
+48  channels -> GroupNorm(8, 48)
+96  channels -> GroupNorm(8, 96)
+192 channels -> GroupNorm(8, 192)
+384 channels -> GroupNorm(8, 384)
+768 channels -> GroupNorm(8, 768)
+```
+
+这个设计避免了 batch size 较小时 BatchNorm 不稳定的问题。
+
+### 13.2 SharedMLP1d
+
+`SharedMLP1d(in_channels, out_channels)` 是：
+
+```text
+Conv1d(in_channels -> out_channels, kernel_size=1, bias=False)
+GroupNorm(out_channels)
+ReLU(inplace=True)
+```
+
+它对每个点独立做 1x1 卷积，不改变点数。
+
+输入输出形状：
+
+```text
+[B, C_in, N] -> [B, C_out, N]
+```
+
+### 13.3 SharedMLP2d
+
+`SharedMLP2d(in_channels, out_channels)` 是：
+
+```text
+Conv2d(in_channels -> out_channels, kernel_size=1, bias=False)
+GroupNorm(out_channels)
+ReLU(inplace=True)
+```
+
+它用于局部邻域特征。输入输出形状：
+
+```text
+[B, C_in, npoint, k] -> [B, C_out, npoint, k]
+```
+
+其中：
+
+```text
+npoint = FPS 采样后的中心点数量
+k = 每个中心点的 KNN 邻居数量
+```
+
+### 13.4 InvResMLP
+
+`InvResMLP(channels, expansion=4)` 是一个 residual block：
+
+```text
+输入 x: [B, C, N]
+
+主分支:
+  Conv1d(C -> 4C, kernel_size=1, bias=False)
+  GroupNorm(4C)
+  ReLU(inplace=True)
+  Conv1d(4C -> C, kernel_size=1, bias=False)
+  GroupNorm(C)
+
+残差:
+  x + main_branch(x)
+
+输出:
+  ReLU(x + main_branch(x))
+```
+
+它不改变点数，也不改变通道数，只增强每个点的特征表达。
+
+## 14. 输入与坐标整理
+
+`PointNeXtEncoder.forward(x)` 的第一步：
+
+```python
+xyz = x.transpose(1, 2).contiguous()
+features = self.stem(x)
+```
+
+输入：
+
+```text
+x: [B, 3, 2048]
+```
+
+得到：
+
+```text
+xyz: [B, 2048, 3]
+```
+
+这里：
+
+- `xyz` 用于 FPS 采样和 KNN 搜索。
+- `features` 是每个点的可学习特征。
+
+## 15. Stem 逐层结构
+
+Stem 定义：
+
+```python
+self.stem = nn.Sequential(
+    SharedMLP1d(in_channels, width),
+    SharedMLP1d(width, width),
+)
+```
+
+当前 `in_channels=3`，`width=48`，所以展开为：
+
+```text
+Stem input:
+  x: [B, 3, 2048]
+
+Layer stem.0:
+  Conv1d(3 -> 48, kernel=1, bias=False)
+  GroupNorm(8, 48)
+  ReLU
+  output: [B, 48, 2048]
+
+Layer stem.1:
+  Conv1d(48 -> 48, kernel=1, bias=False)
+  GroupNorm(8, 48)
+  ReLU
+  output: [B, 48, 2048]
+```
+
+Stem 输出：
+
+```text
+features: [B, 48, 2048]
+xyz:      [B, 2048, 3]
+```
+
+## 16. SA1 逐层结构
+
+SA1 定义：
+
+```python
+self.sa1 = SetAbstraction(
+    in_channels=48,
+    out_channels=96,
+    npoint=512,
+    nsample=24
+)
+```
+
+### 16.1 FPS 采样
+
+输入：
+
+```text
+xyz:      [B, 2048, 3]
+features: [B, 48, 2048]
+```
+
+FPS：
+
+```text
+farthest_point_sample(xyz, npoint=512)
+```
+
+输出中心点索引：
+
+```text
+fps_idx: [B, 512]
+```
+
+取中心点坐标：
+
+```text
+new_xyz = index_points(xyz, fps_idx)
+new_xyz: [B, 512, 3]
+```
+
+取中心点原始特征：
+
+```text
+center_features:
+  features.transpose(1, 2): [B, 2048, 48]
+  index_points(..., fps_idx): [B, 512, 48]
+  transpose back: [B, 48, 512]
+```
+
+### 16.2 KNN 局部邻域
+
+对每个中心点找 24 个邻居：
+
+```text
+group_idx = knn_point(nsample=24, xyz, new_xyz)
+group_idx: [B, 512, 24]
+```
+
+邻域点坐标：
+
+```text
+grouped_xyz = index_points(xyz, group_idx)
+grouped_xyz: [B, 512, 24, 3]
+```
+
+转成局部相对坐标：
+
+```text
+grouped_xyz = grouped_xyz - new_xyz.unsqueeze(2)
+grouped_xyz: [B, 512, 24, 3]
+```
+
+邻域点特征：
+
+```text
+features.transpose(1, 2): [B, 2048, 48]
+index_points(..., group_idx): [B, 512, 24, 48]
+permute: [B, 48, 512, 24]
+```
+
+拼接相对坐标和邻域特征：
+
+```text
+grouped_xyz.permute: [B, 3, 512, 24]
+grouped_features:    [B, 48, 512, 24]
+concat:              [B, 51, 512, 24]
+```
+
+这里 51 来自：
+
+```text
+48 feature channels + 3 relative xyz channels = 51
+```
+
+### 16.3 SA1 局部 MLP
+
+SA1 的 `self.mlp`：
+
+```text
+SharedMLP2d(51 -> 96)
+SharedMLP2d(96 -> 96)
+```
+
+逐层展开：
+
+```text
+Input: [B, 51, 512, 24]
+
+sa1.mlp.0:
+  Conv2d(51 -> 96, kernel=1, bias=False)
+  GroupNorm(8, 96)
+  ReLU
+  output: [B, 96, 512, 24]
+
+sa1.mlp.1:
+  Conv2d(96 -> 96, kernel=1, bias=False)
+  GroupNorm(8, 96)
+  ReLU
+  output: [B, 96, 512, 24]
+```
+
+对每个中心点的 24 个邻居做 max pooling：
+
+```text
+aggregated = mlp_output.max(dim=-1)[0]
+aggregated: [B, 96, 512]
+```
+
+### 16.4 SA1 skip connection
+
+skip 分支：
+
+```text
+center_features: [B, 48, 512]
+
+Conv1d(48 -> 96, kernel=1, bias=False)
+GroupNorm(8, 96)
+
+shortcut: [B, 96, 512]
+```
+
+融合：
+
+```text
+new_features = ReLU(aggregated + shortcut)
+new_features: [B, 96, 512]
+```
+
+SA1 输出：
+
+```text
+xyz:      [B, 512, 3]
+features: [B, 96, 512]
+```
+
+## 17. Stage1 逐层结构
+
+Stage1 定义：
+
+```python
+self.stage1 = nn.Sequential(
+    InvResMLP(96),
+    InvResMLP(96)
+)
+```
+
+输入：
+
+```text
+features: [B, 96, 512]
+```
+
+### 17.1 Stage1 block 0
+
+```text
+Input: [B, 96, 512]
+
+Conv1d(96 -> 384, kernel=1, bias=False)
+GroupNorm(8, 384)
+ReLU
+Conv1d(384 -> 96, kernel=1, bias=False)
+GroupNorm(8, 96)
+Add residual
+ReLU
+
+Output: [B, 96, 512]
+```
+
+### 17.2 Stage1 block 1
+
+结构完全相同：
+
+```text
+Input:  [B, 96, 512]
+96 -> 384 -> 96
+Output: [B, 96, 512]
+```
+
+Stage1 输出：
+
+```text
+xyz:      [B, 512, 3]
+features: [B, 96, 512]
+```
+
+## 18. SA2 逐层结构
+
+SA2 定义：
+
+```python
+self.sa2 = SetAbstraction(
+    in_channels=96,
+    out_channels=192,
+    npoint=128,
+    nsample=24
+)
+```
+
+### 18.1 FPS 采样
+
+输入：
+
+```text
+xyz:      [B, 512, 3]
+features: [B, 96, 512]
+```
+
+FPS：
+
+```text
+farthest_point_sample(xyz, npoint=128)
+fps_idx: [B, 128]
+```
+
+中心点坐标：
+
+```text
+new_xyz: [B, 128, 3]
+```
+
+中心点特征：
+
+```text
+center_features: [B, 96, 128]
+```
+
+### 18.2 KNN 局部邻域
+
+```text
+group_idx = knn_point(nsample=24, xyz, new_xyz)
+group_idx: [B, 128, 24]
+```
+
+邻域相对坐标：
+
+```text
+grouped_xyz: [B, 128, 24, 3]
+grouped_xyz - new_xyz.unsqueeze(2): [B, 128, 24, 3]
+```
+
+邻域特征：
+
+```text
+grouped_features: [B, 96, 128, 24]
+```
+
+拼接：
+
+```text
+relative xyz:     [B, 3, 128, 24]
+grouped_features: [B, 96, 128, 24]
+concat:           [B, 99, 128, 24]
+```
+
+这里 99 来自：
+
+```text
+96 feature channels + 3 relative xyz channels = 99
+```
+
+### 18.3 SA2 局部 MLP
+
+SA2 的 `self.mlp`：
+
+```text
+SharedMLP2d(99 -> 192)
+SharedMLP2d(192 -> 192)
+```
+
+逐层展开：
+
+```text
+Input: [B, 99, 128, 24]
+
+sa2.mlp.0:
+  Conv2d(99 -> 192, kernel=1, bias=False)
+  GroupNorm(8, 192)
+  ReLU
+  output: [B, 192, 128, 24]
+
+sa2.mlp.1:
+  Conv2d(192 -> 192, kernel=1, bias=False)
+  GroupNorm(8, 192)
+  ReLU
+  output: [B, 192, 128, 24]
+```
+
+邻域 max pooling：
+
+```text
+aggregated = mlp_output.max(dim=-1)[0]
+aggregated: [B, 192, 128]
+```
+
+### 18.4 SA2 skip connection
+
+skip 分支：
+
+```text
+center_features: [B, 96, 128]
+
+Conv1d(96 -> 192, kernel=1, bias=False)
+GroupNorm(8, 192)
+
+shortcut: [B, 192, 128]
+```
+
+融合：
+
+```text
+new_features = ReLU(aggregated + shortcut)
+new_features: [B, 192, 128]
+```
+
+SA2 输出：
+
+```text
+xyz:      [B, 128, 3]
+features: [B, 192, 128]
+```
+
+## 19. Stage2 逐层结构
+
+Stage2 定义：
+
+```python
+self.stage2 = nn.Sequential(
+    InvResMLP(192),
+    InvResMLP(192)
+)
+```
+
+输入：
+
+```text
+features: [B, 192, 128]
+```
+
+### 19.1 Stage2 block 0
+
+```text
+Input: [B, 192, 128]
+
+Conv1d(192 -> 768, kernel=1, bias=False)
+GroupNorm(8, 768)
+ReLU
+Conv1d(768 -> 192, kernel=1, bias=False)
+GroupNorm(8, 192)
+Add residual
+ReLU
+
+Output: [B, 192, 128]
+```
+
+### 19.2 Stage2 block 1
+
+结构完全相同：
+
+```text
+Input:  [B, 192, 128]
+192 -> 768 -> 192
+Output: [B, 192, 128]
+```
+
+Stage2 输出：
+
+```text
+xyz:      [B, 128, 3]
+features: [B, 192, 128]
+```
+
+## 20. Global pooling 逐层结构
+
+PointNeXt encoder 在最后不再保留点级输出，而是把 128 个点的特征聚合成一个全局 shape descriptor。
+
+输入：
+
+```text
+features: [B, 192, 128]
+```
+
+max pooling：
+
+```text
+max_feat = adaptive_max_pool1d(features, 1).squeeze(-1)
+max_feat: [B, 192]
+```
+
+avg pooling：
+
+```text
+avg_feat = adaptive_avg_pool1d(features, 1).squeeze(-1)
+avg_feat: [B, 192]
+```
+
+拼接：
+
+```text
+global_feat = concat(max_feat, avg_feat)
+global_feat: [B, 384]
+```
+
+这里：
+
+- max pooling 更关注显著局部结构。
+- avg pooling 更保留整体形状分布。
+- 拼接后作为最终 latent head 的输入。
+
+## 21. Head MLP 逐层结构
+
+Head 定义：
+
+```python
+self.head = nn.Sequential(
+    nn.Linear(final_dim * 2, 512, bias=False),
+    nn.LayerNorm(512),
+    nn.ReLU(inplace=True),
+    nn.Dropout(dropout),
+    nn.Linear(512, 256, bias=False),
+    nn.LayerNorm(256),
+    nn.ReLU(inplace=True),
+    nn.Dropout(dropout),
+    nn.Linear(256, out_channels),
+)
+```
+
+当前：
+
+```text
+final_dim = width * 4 = 192
+final_dim * 2 = 384
+out_channels = 32
+dropout = 0.05
+```
+
+逐层展开：
+
+```text
+Input global_feat:
+  [B, 384]
+
+head.0:
+  Linear(384 -> 512, bias=False)
+  output: [B, 512]
+
+head.1:
+  LayerNorm(512)
+  output: [B, 512]
+
+head.2:
+  ReLU(inplace=True)
+  output: [B, 512]
+
+head.3:
+  Dropout(p=0.05)
+  output: [B, 512]
+
+head.4:
+  Linear(512 -> 256, bias=False)
+  output: [B, 256]
+
+head.5:
+  LayerNorm(256)
+  output: [B, 256]
+
+head.6:
+  ReLU(inplace=True)
+  output: [B, 256]
+
+head.7:
+  Dropout(p=0.05)
+  output: [B, 256]
+
+head.8:
+  Linear(256 -> 32, bias=True)
+  output: [B, 32]
+```
+
+最终输出：
+
+```text
+pred_latent: [B, 32]
+```
+
+这个 32 维向量会直接作为 DeepSDF decoder 的 shape code。
+
+## 22. PointNeXt 参数量估算
+
+按当前默认 `width=48`、`latent_size=32` 粗略计算，主要可学习参数来自：
+
+```text
+Stem:
+  Conv1d 3->48:    3 * 48 = 144
+  GroupNorm 48:    48 gamma + 48 beta = 96
+  Conv1d 48->48:   48 * 48 = 2304
+  GroupNorm 48:    96
+
+SA1:
+  MLP 51->96:      51 * 96 = 4896
+  GN 96:           192
+  MLP 96->96:      96 * 96 = 9216
+  GN 96:           192
+  skip 48->96:     48 * 96 = 4608
+  skip GN 96:      192
+
+Stage1:
+  每个 block:
+    Conv 96->384:  96 * 384 = 36864
+    GN 384:        768
+    Conv 384->96:  384 * 96 = 36864
+    GN 96:         192
+  两个 block 合计约 149376
+
+SA2:
+  MLP 99->192:     99 * 192 = 19008
+  GN 192:          384
+  MLP 192->192:    192 * 192 = 36864
+  GN 192:          384
+  skip 96->192:    96 * 192 = 18432
+  skip GN 192:     384
+
+Stage2:
+  每个 block:
+    Conv 192->768: 192 * 768 = 147456
+    GN 768:        1536
+    Conv 768->192: 768 * 192 = 147456
+    GN 192:        384
+  两个 block 合计约 593664
+
+Head:
+  Linear 384->512: 384 * 512 = 196608
+  LayerNorm 512:   1024
+  Linear 512->256: 512 * 256 = 131072
+  LayerNorm 256:   512
+  Linear 256->32:  256 * 32 + 32 = 8224
+```
+
+整体参数规模大约在：
+
+```text
+约 1.18M 参数
+```
+
+这是一个轻量点云 encoder，相比 DeepSDF decoder 本身更小；它的主要作用是把点云观测映射到已有 DeepSDF latent manifold。
+
+## 23. PointNeXt 数据流总结
+
+完整数据流可以压缩成下面这张表：
+
+```text
+阶段          输出点数  输出通道  输出形状
+Input         2048     3         [B, 3, 2048]
+Stem          2048     48        [B, 48, 2048]
+SA1           512      96        [B, 96, 512]
+Stage1        512      96        [B, 96, 512]
+SA2           128      192       [B, 192, 128]
+Stage2        128      192       [B, 192, 128]
+Max pool      1        192       [B, 192]
+Avg pool      1        192       [B, 192]
+Concat        1        384       [B, 384]
+Head FC1      -        512       [B, 512]
+Head FC2      -        256       [B, 256]
+Head output   -        32        [B, 32]
+```
+
+最终：
+
+```text
+[B, 32] pred_latent
+    -> DeepSDF decoder
+    -> SDF field
+    -> marching cubes mesh
+    -> mesh_volume_ml
+```

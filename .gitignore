@@ -31,3 +31,5 @@ __pycache__/
 .idea/
 .DS_Store
 architecture_regression.md
+baseline_comparison/
+paper_related/

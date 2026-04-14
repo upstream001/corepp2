@@ -25,10 +25,22 @@ from dataloaders.transforms import Pad, Rotate, RandomHorizontalFlip, RandomVert
 from networks.models import Encoder, EncoderBig, ERFNetEncoder, EncoderBigPooled, EncoderPooled, DoubleEncoder, PointCloudEncoder, PointCloudEncoderLarge, FoldNetEncoder
 import networks.utils as net_utils
 from networks.pointnext import PointNeXtEncoder, build_pointnext_encoder
+from networks.pointnet import PointNetEncoder, build_pointnet_encoder
+from networks.pointnet2 import PointNet2Encoder, build_pointnet2_encoder
 from loss import KLDivLoss, SuperLoss, SDFLoss, SDFLoss_new, RegLatentLoss, AttRepLoss, LatentSpreadLoss, VolumeLoss
 from utils import sdf2mesh_cuda, save_model, tensor_dict_2_float_dict
 
 DEBUG = True
+
+POINT_CLOUD_ENCODERS = {
+    'point_cloud',
+    'point_cloud_large',
+    'foldnet',
+    'pointnext',
+    'pointnet',
+    'pointnet2',
+    'pointnet++',
+}
 
 torch.autograd.set_detect_anomaly(True)
 
@@ -154,6 +166,7 @@ def main_function(decoder, train_pretrain, val_pretrain, cfg, latent_size, trunc
     volume_loss_relative_weight = float(param.get("volume_loss_relative_weight", 0.5))
     train_volume_head = lambda_volume > 0
     validate_mesh_volume = bool(param.get("validate_mesh_volume", True))
+    selection_metric = str(param.get("selection_metric", "latent_mse")).lower()
     volume_unit = str(param.get("volume_unit", "cm")).lower()
     volume_scale_factor = float(param.get("volume_scale_factor", 1.0))
     validation_mesh_dir = os.path.join(param["checkpoint_dir"], "..", "val_output")
@@ -183,6 +196,10 @@ def main_function(decoder, train_pretrain, val_pretrain, cfg, latent_size, trunc
         encoder = FoldNetEncoder(in_channels=3, out_channels=latent_size).to(device)
     elif param['encoder'] == 'pointnext':
         encoder = build_pointnext_encoder(out_channels=latent_size, cfg=param).to(device)
+    elif param['encoder'] == 'pointnet':
+        encoder = build_pointnet_encoder(out_channels=latent_size, cfg=param).to(device)
+    elif param['encoder'] in ['pointnet2', 'pointnet++']:
+        encoder = build_pointnet2_encoder(out_channels=latent_size, cfg=param).to(device)
     else:
         encoder = Encoder(in_channels=4, out_channels=latent_size, size=param["input_size"]).to(device)
 
@@ -208,7 +225,7 @@ def main_function(decoder, train_pretrain, val_pretrain, cfg, latent_size, trunc
 
     sdf_chunk_size = int(param.get("sdf_chunk_size", 65536))
 
-    if param['encoder'] in ['point_cloud', 'point_cloud_large', 'foldnet', 'pointnext']:
+    if param['encoder'] in POINT_CLOUD_ENCODERS:
         cl_dataset = PointCloudDataset(
             data_source=param["data_dir"],
             pad_size=param["input_size"],
@@ -269,7 +286,7 @@ def main_function(decoder, train_pretrain, val_pretrain, cfg, latent_size, trunc
             loss = 0
 
             # unpacking inputs
-            if param['encoder'] not in ['point_cloud', 'point_cloud_large', 'foldnet', 'pointnext']:
+            if param['encoder'] not in POINT_CLOUD_ENCODERS:
                 encoder_input = torch.cat((item['rgb'], item['depth']), 1).to(device)
             else:
                 encoder_input = item['partial_pcd'].permute(0, 2, 1).to(device) ## be aware: the current partial pcd is not registered to the target pcd!
@@ -394,6 +411,9 @@ def main_function(decoder, train_pretrain, val_pretrain, cfg, latent_size, trunc
         # validation step
         if (e+1) % param["validation_frequency"] == 0:
             with torch.no_grad():
+                encoder.eval()
+                volume_head.eval()
+                decoder.eval()
                 val_tfs = [Pad(size=param["input_size"])]
                 val_tf = v2.Compose(val_tfs)
                 val_supervised = param["supervised_3d"] and val_pretrain is not None
@@ -404,7 +424,7 @@ def main_function(decoder, train_pretrain, val_pretrain, cfg, latent_size, trunc
                         "Skipping validation MSE because no val latent-code source was found."
                     )
 
-                if param['encoder'] in ['point_cloud', 'point_cloud_large', 'foldnet', 'pointnext']:
+                if param['encoder'] in POINT_CLOUD_ENCODERS:
                     val_cl_dataset = PointCloudDataset(
                         data_source=param["data_dir"],
                         pad_size=param["input_size"],
@@ -443,7 +463,7 @@ def main_function(decoder, train_pretrain, val_pretrain, cfg, latent_size, trunc
                 if val_supervised:
                     for sample_idx, item in enumerate(tqdm(iter(val_dataset))):
                         try:
-                            if param['encoder'] not in ['point_cloud', 'point_cloud_large', 'foldnet', 'pointnext']:
+                            if param['encoder'] not in POINT_CLOUD_ENCODERS:
                                 encoder_input = torch.cat((item['rgb'], item['depth']), 1).to(device)
                             else:
                                 encoder_input = item['partial_pcd'].permute(0, 2, 1).to(device)
@@ -476,11 +496,11 @@ def main_function(decoder, train_pretrain, val_pretrain, cfg, latent_size, trunc
 
                             if args.overfit:
                                 break
-                        except Exception as e:
+                        except Exception as exc:
                             sample_name = item.get('fruit_id', ['unknown'])
                             if isinstance(sample_name, (list, tuple)):
                                 sample_name = sample_name[0]
-                            print(f"[Warning] Validation sample {sample_idx} ({sample_name}) failed: {e}")
+                            print(f"[Warning] Validation sample {sample_idx} ({sample_name}) failed: {exc}")
 
                 if len(val_losses) > 0:
                     rmse_volume = sum(val_losses) / len(val_losses)
@@ -516,10 +536,19 @@ def main_function(decoder, train_pretrain, val_pretrain, cfg, latent_size, trunc
                 else:
                     print('Validation Mesh Volume RMSE: NaN')
 
-                if np.isfinite(rmse_mesh_volume):
-                    val_score = rmse_mesh_volume
-                elif np.isfinite(rmse_volume) and np.isfinite(val_volume_loss):
-                    val_score = rmse_volume + lambda_volume * val_volume_loss
+                if selection_metric == "mesh_volume_rmse":
+                    val_score = rmse_mesh_volume if np.isfinite(rmse_mesh_volume) else rmse_volume
+                elif selection_metric == "volume_loss":
+                    val_score = val_volume_loss if np.isfinite(val_volume_loss) else rmse_volume
+                elif selection_metric == "combined":
+                    components = []
+                    if np.isfinite(rmse_volume):
+                        components.append(rmse_volume)
+                    if np.isfinite(val_volume_loss):
+                        components.append(lambda_volume * val_volume_loss)
+                    if np.isfinite(rmse_mesh_volume):
+                        components.append(rmse_mesh_volume)
+                    val_score = sum(components) if components else float("nan")
                 else:
                     val_score = rmse_volume
 
@@ -545,6 +574,11 @@ def main_function(decoder, train_pretrain, val_pretrain, cfg, latent_size, trunc
                 )
                 print('saving best model')
             print()
+            encoder.train()
+            if train_volume_head:
+                volume_head.train()
+            if update_decoder:
+                decoder.train()
 
         # saving checkpoints
         if (e+1) % param["checkpoint_frequency"] == 0:

@@ -97,6 +97,8 @@ class CustomTestDataset(torch.utils.data.Dataset):
 
 from networks.models import Encoder, EncoderBig, ERFNetEncoder, EncoderBigPooled, EncoderPooled, DoubleEncoder, PointCloudEncoder, PointCloudEncoderLarge, FoldNetEncoder
 from networks.pointnext import PointNeXtEncoder, build_pointnext_encoder
+from networks.pointnet import PointNetEncoder, build_pointnet_encoder
+from networks.pointnet2 import PointNet2Encoder, build_pointnet2_encoder
 import networks.utils as net_utils
 
 import open3d as o3d
@@ -117,6 +119,16 @@ pr = precision_recall.PrecisionRecall(0.001, 0.01, 10)
 torch.autograd.set_detect_anomaly(True)
 import pandas as pd
 from sklearn.metrics import mean_squared_error
+
+POINT_CLOUD_ENCODERS = {
+    'point_cloud',
+    'point_cloud_large',
+    'foldnet',
+    'pointnext',
+    'pointnet',
+    'pointnet2',
+    'pointnet++',
+}
 
 
 def _map_vertices_from_canonical_cube(vertices, bbox_min, bbox_max, cube_min=-3.0, cube_max=3.0):
@@ -375,6 +387,10 @@ def main_function(decoder, pretrain, cfg, latent_size, test_data_dir=None):
         encoder = FoldNetEncoder(in_channels=3, out_channels=latent_size).to(device)
     elif param['encoder'] == 'pointnext':
         encoder = build_pointnext_encoder(out_channels=latent_size, cfg=param).to(device)
+    elif param['encoder'] == 'pointnet':
+        encoder = build_pointnet_encoder(out_channels=latent_size, cfg=param).to(device)
+    elif param['encoder'] in ['pointnet2', 'pointnet++']:
+        encoder = build_pointnet2_encoder(out_channels=latent_size, cfg=param).to(device)
     else:
         encoder = Encoder(in_channels=4, out_channels=latent_size, size=param["input_size"]).to(device)
 
@@ -400,8 +416,10 @@ def main_function(decoder, pretrain, cfg, latent_size, test_data_dir=None):
     ##############################
 
     decoder.to(device)
+    encoder.eval()
     volume_head.to(device)
     volume_head.eval()
+    decoder.eval()
 
     volume_head_calibration_coeffs = np.array([1.0, 0.0], dtype=np.float64)
     use_volume_head_calibration = bool(param.get('calibrate_volume_head_on_val', False))
@@ -415,7 +433,7 @@ def main_function(decoder, pretrain, cfg, latent_size, test_data_dir=None):
         cl_dataset = CustomTestDataset(data_source=test_data_dir, pad_size=param["input_size"], norm_scale=norm_scale)
         print(f"Testing on custom dataset directory: {test_data_dir}")
     else:
-        if param['encoder'] in ['point_cloud', 'point_cloud_large', 'foldnet', 'pointnext']:
+        if param['encoder'] in POINT_CLOUD_ENCODERS:
             cl_dataset = PointCloudDataset(
                 data_source=param["data_dir"],
                 pad_size=param["input_size"],
@@ -443,7 +461,7 @@ def main_function(decoder, pretrain, cfg, latent_size, test_data_dir=None):
                                                 )
     dataset = DataLoader(cl_dataset, batch_size=1, shuffle=False)
 
-    if volume_head_enabled and use_volume_head_calibration and test_data_dir is None and param['encoder'] in ['point_cloud', 'point_cloud_large', 'foldnet', 'pointnext']:
+    if volume_head_enabled and use_volume_head_calibration and test_data_dir is None and param['encoder'] in POINT_CLOUD_ENCODERS:
         cal_dataset = PointCloudDataset(
             data_source=param["data_dir"],
             pad_size=param["input_size"],
@@ -494,7 +512,7 @@ def main_function(decoder, pretrain, cfg, latent_size, test_data_dir=None):
             mesh = None
 
             # unpacking inputs
-            if param['encoder'] not in ['point_cloud', 'point_cloud_large', 'foldnet', 'pointnext']:
+            if param['encoder'] not in POINT_CLOUD_ENCODERS:
                 encoder_input = torch.cat((item['rgb'], item['depth']), 1).to(device)
             else: 
                 encoder_input = item['partial_pcd'].permute(0, 2, 1).to(device) ## be aware: the current partial pcd is not registered to the target pcd!
@@ -546,8 +564,8 @@ def main_function(decoder, pretrain, cfg, latent_size, test_data_dir=None):
 
                 mesh_volume_ml = _compute_volume_ml(mesh, unit=volume_unit)
                 mesh_volume_ml *= volume_scale_factor
-            except Exception as e:
-                print(f"  [Mesh Error] {item['frame_id'][0]}: {e}")
+            except Exception as exc:
+                print(f"  [Mesh Error] {item['frame_id'][0]}: {exc}")
                 mesh_volume_ml = 0.0
 
             inference_time = time.time() - start
