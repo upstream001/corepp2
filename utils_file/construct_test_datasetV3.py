@@ -25,7 +25,7 @@ def main():
     ]
     
     # 输出目录
-    output_base_dir = '/home/tianqi/corepp2/data/20260604_dataset'
+    output_base_dir = '/home/tianqi/corepp2/data/20260605_dataset'
     partial_out_dir = os.path.join(output_base_dir, 'partial')
     complete_out_dir = os.path.join(output_base_dir, 'complete')
     

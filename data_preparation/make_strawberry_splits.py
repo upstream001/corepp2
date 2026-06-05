@@ -57,6 +57,25 @@ def load_shape_groups(dataset_root, complete_dir):
     return ordered_groups, "mapping"
 
 
+def load_complete_aliases_and_mapping(dataset_root):
+    mapping_path = os.path.join(dataset_root, "mapping.json")
+    if not os.path.exists(mapping_path):
+        return {}, {}
+
+    with open(mapping_path, "r", encoding="utf-8") as f:
+        mapping = json.load(f)
+
+    aliases = {}
+    for complete_name in sorted(set(mapping.values()), key=natural_sort_key):
+        complete_id = os.path.splitext(complete_name)[0]
+        if complete_id.isdigit():
+            canonical_id = f"{int(complete_id) - 1:05d}"
+        else:
+            canonical_id = complete_id
+        aliases[complete_id] = canonical_id
+    return aliases, mapping
+
+
 def create_split_file(complete_dir, train_ratio=0.8, val_ratio=0.1, output_file=None, seed=42):
     """
     Split complete point clouds at shape level using the complete .ply files
@@ -113,7 +132,7 @@ def create_split_file(complete_dir, train_ratio=0.8, val_ratio=0.1, output_file=
     print(f"Created split file: {output_file}")
 
 
-def create_deepsdf_splits(dataset_name, split_json_path, output_dir):
+def create_deepsdf_splits(dataset_name, split_json_path, output_dir, dataset_root=None, unique_complete=False):
     """
     DeepSDF needs separate JSON files for train and test splits, and it expects
     them in a specific format representing the class name and instance names.
@@ -123,22 +142,50 @@ def create_deepsdf_splits(dataset_name, split_json_path, output_dir):
         splits = json.load(f)
 
     os.makedirs(output_dir, exist_ok=True)
+    complete_aliases = {}
+    mapping = {}
+    if unique_complete and dataset_root:
+        complete_aliases, mapping = load_complete_aliases_and_mapping(dataset_root)
+
+    if unique_complete and not complete_aliases:
+        raise RuntimeError(
+            "unique_complete=True requires mapping.json so partial samples can be collapsed "
+            "to unique complete-shape ids."
+        )
 
     for split_name in ['train', 'val', 'test']:
         if split_name not in splits: continue
+
+        split_items = splits[split_name]
+        if unique_complete:
+            seen = set()
+            collapsed = []
+            for sample_id in split_items:
+                sample_name = f"{sample_id}.ply"
+                complete_name = mapping.get(sample_name)
+                if complete_name is None:
+                    continue
+                complete_id = os.path.splitext(complete_name)[0]
+                canonical_id = complete_aliases.get(complete_id, complete_id)
+                if canonical_id in seen:
+                    continue
+                seen.add(canonical_id)
+                collapsed.append(canonical_id)
+            split_items = collapsed
         
         # DeepSDF structure: {'DatasetName': {'ClassName': ['instance1', 'instance2', ... ]}}
         # In our case we just pass the file names as instance names.
         dsdf_split = {
             dataset_name: {
-                "fruit": splits[split_name] 
+                "fruit": split_items
             }
         }
         
         out_file = os.path.join(output_dir, f"{dataset_name}_{split_name}.json")
         with open(out_file, 'w') as f:
             json.dump(dsdf_split, f, indent=4)
-        print(f"Created DeepSDF split: {out_file}")
+        label = "unique-complete" if unique_complete else "expanded"
+        print(f"Created DeepSDF split ({label}): {out_file}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -159,4 +206,12 @@ if __name__ == "__main__":
     
     split_file_path = os.path.join(resolve_dataset_root(args.complete_dir), "split.json")
     dataset_name = resolve_dataset_name(args.complete_dir)
+    dataset_root = resolve_dataset_root(args.complete_dir)
     create_deepsdf_splits(dataset_name, split_file_path, args.deepsdf_splits_dir)
+    create_deepsdf_splits(
+        dataset_name + "_unique_complete",
+        split_file_path,
+        args.deepsdf_splits_dir,
+        dataset_root=dataset_root,
+        unique_complete=True,
+    )

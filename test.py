@@ -168,6 +168,15 @@ def _threshold_tag(t):
     return s.replace(".", "p")
 
 
+def _mm_threshold_to_point_units(threshold_mm, unit):
+    unit = str(unit).lower()
+    if unit == "mm":
+        return float(threshold_mm)
+    if unit == "m":
+        return float(threshold_mm) / 1000.0
+    return float(threshold_mm) / 10.0
+
+
 def _load_ground_truth_volumes(gt_csv_path):
     gt_volumes = {}
     if not os.path.exists(gt_csv_path):
@@ -371,7 +380,10 @@ def main_function(decoder, pretrain, cfg, latent_size, test_data_dir=None):
                 'chamfer_distance',
                 'precision',
                 'recall',
-                'f1'
+                'f1',
+                'precision_paper_5mm',
+                'recall_paper_5mm',
+                'f1_paper_5mm',
                 ]
     save_df = pd.DataFrame(columns=columns)
 
@@ -397,14 +409,21 @@ def main_function(decoder, pretrain, cfg, latent_size, test_data_dir=None):
     volume_unit = str(param.get("volume_unit", "cm")).lower()
     volume_scale_factor = float(param.get("volume_scale_factor", 1.0))
     remap_mesh_to_gt_bbox = bool(param.get("remap_mesh_to_gt_bbox", False))
+    paper_metric_threshold_mm = float(param.get("paper_metric_threshold_mm", 5.0))
+    paper_metric_threshold_unit = _mm_threshold_to_point_units(
+        paper_metric_threshold_mm, volume_unit
+    )
     repo_root = os.path.dirname(os.path.abspath(__file__))
     mapping_data_source = test_data_dir if test_data_dir is not None else param.get("data_dir")
     gt_csv_path = _resolve_ground_truth_csv(mapping_data_source, param.get("ground_truth_csv"))
     complete_volume_lookup = _load_complete_volume_lookup(mapping_data_source, gt_csv_path)
     pr_max_t = max(0.01, max(metric_thresholds))
     pr_num = max(10, int(round((pr_max_t - 0.001) / 0.001)) + 1)
+    paper_pr_max_t = max(0.01, paper_metric_threshold_unit)
+    paper_pr_num = max(10, int(round((paper_pr_max_t - 0.001) / 0.001)) + 1)
     cd_metric = chamfer_distance.ChamferDistance()
     pr_metric = precision_recall.PrecisionRecall(0.001, pr_max_t, pr_num)
+    paper_pr_metric = precision_recall.PrecisionRecall(0.001, paper_pr_max_t, paper_pr_num)
 
     # creating variables for 3d grid for diff SDF renderer
     threshold = param['threshold']
@@ -625,7 +644,10 @@ def main_function(decoder, pretrain, cfg, latent_size, test_data_dir=None):
                     'chamfer_distance': 0.0,
                     'precision': 0.0,
                     'recall': 0.0,
-                    'f1': 0.0
+                    'f1': 0.0,
+                    'precision_paper_5mm': 0.0,
+                    'recall_paper_5mm': 0.0,
+                    'f1_paper_5mm': 0.0,
                 }
                 save_df = pd.concat([save_df, pd.DataFrame([cur_data])], ignore_index=True)
                 save_df.to_csv("shape_completion_results.csv", mode='w+', index=False)
@@ -670,6 +692,18 @@ def main_function(decoder, pretrain, cfg, latent_size, test_data_dir=None):
 
             prec, rec, f1 = metrics_by_t[metric_threshold]
 
+            paper_eval_gt = o3d.geometry.PointCloud()
+            paper_eval_gt.points = o3d.utility.Vector3dVector(shifted_gt)
+            paper_eval_mesh = o3d.geometry.TriangleMesh()
+            paper_eval_mesh.vertices = o3d.utility.Vector3dVector(mesh_pts - local_center)
+            paper_eval_mesh.triangles = mesh.triangles
+
+            paper_pr_metric.reset()
+            paper_pr_metric.update(paper_eval_gt, paper_eval_mesh)
+            paper_prec, paper_rec, paper_f1, _ = paper_pr_metric.compute_at_threshold(
+                paper_metric_threshold_unit, print_output=False
+            )
+
             cur_data = {
                 'fruit_id': item['fruit_id'][0],
                 'frame_id': frame_id,
@@ -678,7 +712,10 @@ def main_function(decoder, pretrain, cfg, latent_size, test_data_dir=None):
                 'chamfer_distance': round(chamfer_dist_value, 6),
                 'precision': round(prec, 1),
                 'recall': round(rec, 1),
-                'f1': round(f1, 1)
+                'f1': round(f1, 1),
+                'precision_paper_5mm': round(paper_prec, 1),
+                'recall_paper_5mm': round(paper_rec, 1),
+                'f1_paper_5mm': round(paper_f1, 1),
                 }
                 
             save_df = pd.concat([save_df, pd.DataFrame([cur_data])], ignore_index=True)

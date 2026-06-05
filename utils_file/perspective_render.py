@@ -291,7 +291,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Perspective Render Test')
     parser.add_argument('--input', type=str, default='/home/tianqi/corepp2/data/220_strawberries', help='Input PLY')
     parser.add_argument('--output_dir', type=str, default='/home/tianqi/corepp2/data/render_output_perspective')
-    parser.add_argument('--num', type=int, default=3)
+    parser.add_argument('--num', type=int, default=5)
     args = parser.parse_args()
 
     # 使用 open3d 进行读写，更健壮

@@ -245,7 +245,7 @@ if __name__ == "__main__":
     parser.add_argument('--vis', action='store_true', help='Visualize the results')
     parser.add_argument('--save', action='store_true', default=True, help='Save the results to disk')
     parser.add_argument('--output_dir', type=str, default='data/render_output', help='Directory to save results')
-    parser.add_argument('--num', type=int, default=3, help='Number of partial point clouds to generate per input file')
+    parser.add_argument('--num', type=int, default=5, help='Number of partial point clouds to generate per input file')
     args = parser.parse_args()
 
     def visualize_pc(points, title="Point Cloud"):

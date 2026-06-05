@@ -51,6 +51,7 @@ class PointCloudDataset(torch.utils.data.Dataset):
         self.sdf_trunc = float(sdf_trunc)
         self._sdf_cache = {}
         self.volume_lookup = self._load_volume_lookup()
+        self.partial_to_complete = self._load_partial_to_complete_mapping()
         self.sample_aliases = self._load_optional_json("sample_aliases.json")
         self.reference_centers = self._load_optional_json("reference_centers.json")
 
@@ -71,6 +72,51 @@ class PointCloudDataset(torch.utils.data.Dataset):
     def _resolve_alias(self, fruit_id):
         alias_value = self.sample_aliases.get(fruit_id, fruit_id)
         return os.path.splitext(str(alias_value))[0]
+
+    def _canonical_complete_id(self, complete_name_or_id):
+        complete_id = os.path.splitext(str(complete_name_or_id))[0]
+        if complete_id.isdigit():
+            return f"{int(complete_id) - 1:05d}"
+        return complete_id
+
+    def _load_partial_to_complete_mapping(self):
+        mapping_path = os.path.join(self.data_source, "mapping.json")
+        if not os.path.exists(mapping_path):
+            return {}
+
+        with open(mapping_path, "r", encoding="utf-8") as f:
+            mapping = json.load(f)
+
+        partial_to_complete = {}
+        for partial_name, complete_name in mapping.items():
+            partial_id = os.path.splitext(str(partial_name))[0]
+            complete_id = os.path.splitext(str(complete_name))[0]
+            partial_to_complete[partial_id] = complete_id
+        return partial_to_complete
+
+    def _latent_key_candidates(self, fruit_id):
+        candidates = []
+
+        def _append(value):
+            value = os.path.splitext(str(value))[0]
+            if value and value not in candidates:
+                candidates.append(value)
+
+        _append(fruit_id)
+        _append(self._resolve_alias(fruit_id))
+
+        complete_id = self.partial_to_complete.get(fruit_id)
+        if complete_id is not None:
+            _append(complete_id)
+            _append(self._canonical_complete_id(complete_id))
+
+        return candidates
+
+    def _resolve_latent_key(self, fruit_id):
+        for candidate in self._latent_key_candidates(fruit_id):
+            if candidate in self.latents_dict:
+                return candidate
+        return None
 
     def _load_volume_lookup(self):
         mapping_path = os.path.join(self.data_source, "mapping.json")
@@ -206,13 +252,13 @@ class PointCloudDataset(torch.utils.data.Dataset):
                     continue
 
                 if self.supervised_3d:
-                    latent_key = self._resolve_alias(key)
-                    if latent_key in self.latents_dict:
+                    latent_key = self._resolve_latent_key(key)
+                    if latent_key is not None:
                         files.append(os.path.join(pcd_dir, fname))
                     else:
                         print(
                             f"[Warning] Found {fname} but no corresponding latent code in "
-                            f"{latent_key}.pth"
+                            f"{self._latent_key_candidates(key)}"
                         )
                 else:
                     files.append(os.path.join(pcd_dir, fname))
@@ -314,7 +360,8 @@ class PointCloudDataset(torch.utils.data.Dataset):
     def __getitem__(self, idx):
         file_path = self.files[idx]
         fruit_id = os.path.basename(file_path)[:-4]
-        base_fruit_id = self._resolve_alias(fruit_id)
+        latent_key = self._resolve_latent_key(fruit_id)
+        base_fruit_id = latent_key if latent_key is not None else self._resolve_alias(fruit_id)
 
         pcd = o3d.io.read_point_cloud(file_path)
         points = np.asarray(pcd.points)
