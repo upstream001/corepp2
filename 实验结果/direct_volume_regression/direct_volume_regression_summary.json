@@ -1,0 +1,8 @@
+{
+  "checkpoint": "/home/tianqi/corepp2/logs/direct_volume_regression/checkpoints/20260331_dataset_pointcloud_partial_best.pt",
+  "num_samples": 68,
+  "volume_mae_ml": 2.0746066570281982,
+  "volume_rmse_ml": 2.7565938009170012,
+  "volume_mape_percent": 10.387234831574347,
+  "volume_r2": 0.4848991393626306
+}

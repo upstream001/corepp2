@@ -126,22 +126,73 @@ def _compute_decoder_mesh_volume_ml(decoder, latent, mesh_filename, grid_density
     return volume * volume_scale_factor
 
 
-def resolve_supervision_path(experiment_directory, checkpoint, split, allow_matrix):
+def resolve_supervision_path(experiment_directory, checkpoint, split, allow_matrix, required=True):
     matrix_path = os.path.join(experiment_directory, ws.latent_codes_subdir, checkpoint + ".pth")
     codes_root = os.path.join(experiment_directory, "Reconstructions", checkpoint, "Codes")
+    split_file = os.path.join(
+        os.path.dirname(experiment_directory),
+        "splits",
+        f"{os.path.basename(experiment_directory)}_{split}.json",
+    )
 
     if allow_matrix and os.path.exists(matrix_path):
-        return matrix_path
+        if os.path.exists(split_file):
+            with open(split_file, "r", encoding="utf-8") as f:
+                split_data = json.load(f)
+            ds_name = next(iter(split_data))
+            class_name = next(iter(split_data[ds_name]))
+            expected_count = len(split_data[ds_name][class_name])
+
+            latent_data = torch.load(matrix_path, map_location="cpu")
+            latent_count = latent_data["latent_codes"]["weight"].shape[0]
+            if latent_count == expected_count:
+                return matrix_path
+
+            print(
+                f"[Warning] Skip latent matrix {matrix_path}: rows={latent_count}, "
+                f"but split {split_file} expects {expected_count} samples."
+            )
+        else:
+            return matrix_path
 
     candidate_dirs = [
         os.path.join(codes_root, split),
         os.path.join(codes_root, "complete"),
         os.path.join(codes_root, "partial"),
+        os.path.join(codes_root, "encoder"),
     ]
 
     for candidate in candidate_dirs:
         if os.path.isdir(candidate):
-            return candidate
+            if not os.path.exists(split_file):
+                return candidate
+
+            code_files = [f[:-4] for f in os.listdir(candidate) if f.endswith(".pth")]
+            if len(code_files) == 0:
+                continue
+
+            with open(split_file, "r", encoding="utf-8") as f:
+                split_data = json.load(f)
+            ds_name = next(iter(split_data))
+            class_name = next(iter(split_data[ds_name]))
+            expected_ids = set(split_data[ds_name][class_name])
+            available_ids = set(code_files)
+            missing_ids = sorted(expected_ids - available_ids)
+            if not missing_ids:
+                return candidate
+
+            print(
+                f"[Warning] Skip latent code dir {candidate}: missing {len(missing_ids)} "
+                f"codes for split '{split}' (e.g. {missing_ids[:5]})."
+            )
+
+    if required:
+        raise RuntimeError(
+            "No valid latent supervision source was found. "
+            f"Checkpoint {checkpoint} in {experiment_directory} does not match the current "
+            f"'{split}' split. Re-generate the DeepSDF split/latent codes together, or use "
+            "the exact split file that was used when training this DeepSDF checkpoint."
+        )
 
     return None
 
@@ -160,6 +211,8 @@ def main_function(decoder, train_pretrain, val_pretrain, cfg, latent_size, trunc
 
     check_direxcist(param["checkpoint_dir"])
     device = 'cuda'
+    use_partial_input = bool(param.get("use_partial_input", False))
+    point_center_mode = str(param.get("point_center_mode", "partial_mean"))
     lambda_super = float(param.get("lambda_super", 0.3))
     lambda_latent_spread = float(param.get("lambda_latent_spread", 1.0))
     lambda_volume = float(param.get("lambda_volume", 0.5))
@@ -231,7 +284,8 @@ def main_function(decoder, train_pretrain, val_pretrain, cfg, latent_size, trunc
             pad_size=param["input_size"],
             pretrain=train_pretrain,
             split='train',
-            use_partial=False,
+            use_partial=use_partial_input,
+            point_center_mode=point_center_mode,
             supervised_3d=param["supervised_3d"],
             sdf_loss=param["3D_loss"],
             grid_density=param["grid_density"],
@@ -430,7 +484,8 @@ def main_function(decoder, train_pretrain, val_pretrain, cfg, latent_size, trunc
                         pad_size=param["input_size"],
                         pretrain=val_pretrain,
                         split='val',
-                        use_partial=False,
+                        use_partial=use_partial_input,
+                        point_center_mode=point_center_mode,
                         supervised_3d=val_supervised,
                         sdf_loss=False,
                         grid_density=param["grid_density"],
@@ -671,10 +726,10 @@ if __name__ == "__main__":
     decoder = net_utils.set_require_grad(decoder, True)
 
     train_pretrain_path = resolve_supervision_path(
-        args.experiment_directory, args.checkpoint, split="train", allow_matrix=True
+        args.experiment_directory, args.checkpoint, split="train", allow_matrix=True, required=True
     )
     val_pretrain_path = resolve_supervision_path(
-        args.experiment_directory, args.checkpoint, split="val", allow_matrix=False
+        args.experiment_directory, args.checkpoint, split="val", allow_matrix=False, required=False
     )
 
     main_function(decoder=decoder,

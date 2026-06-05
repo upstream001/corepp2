@@ -68,7 +68,7 @@
     "_comment_lambda_volume": "体积监督损失权重；当前先关闭 volume head，避免其学到与 DeepSDF decoder 不一致的体积捷径。",
     "lambda_volume": 0.0,
     "_comment_lambda_latent_spread": "潜变量分布展开损失权重；当前先调低，避免在 pointnext 尚未稳定时把 latent 分布拉散。",
-    "lambda_latent_spread": 1.0,
+    "lambda_latent_spread": 0.1,
     "_comment_calibrate_volume_head_on_val": "测试时是否使用验证集对 volume head 做线性校准。默认关闭，直接以 raw head 作为主结果更稳。",
     "calibrate_volume_head_on_val": false,
     "_comment_lambda_super": "Latent MSE 主监督权重；保持与原始流程一致，优先让 encoder 输出贴近 DeepSDF latent manifold。",

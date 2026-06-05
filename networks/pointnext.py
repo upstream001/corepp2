@@ -172,8 +172,13 @@ class PointNeXtEncoder(nn.Module):
         sa3_npoint=32,
         stage_depth=2,
         expansion=4,
+        feature_fusion="multi_scale",
+        global_pool="max_avg",
     ):
         super().__init__()
+        self.feature_fusion = str(feature_fusion).lower()
+        self.global_pool = str(global_pool).lower()
+
         self.stem = nn.Sequential(
             SharedMLP1d(in_channels, width),
             SharedMLP1d(width, width),
@@ -189,9 +194,28 @@ class PointNeXtEncoder(nn.Module):
         self.sa3 = SetAbstraction(width * 4, width * 8, npoint=sa3_npoint, nsample=nsample)
         self.stage3 = Stage(width * 8, depth=stage_depth, expansion=expansion)
 
-        fused_dim = width * 2 + width * 4 + width * 8
+        if self.feature_fusion == "multi_scale":
+            fused_dim = width * 2 + width * 4 + width * 8
+        elif self.feature_fusion == "stage3":
+            fused_dim = width * 8
+        else:
+            raise ValueError(
+                f"Unsupported pointnext feature fusion mode: {feature_fusion}. "
+                "Expected one of ['multi_scale', 'stage3']."
+            )
+
+        if self.global_pool == "max_avg":
+            head_in_dim = fused_dim * 2
+        elif self.global_pool in {"max", "avg"}:
+            head_in_dim = fused_dim
+        else:
+            raise ValueError(
+                f"Unsupported pointnext global pool mode: {global_pool}. "
+                "Expected one of ['max', 'avg', 'max_avg']."
+            )
+
         self.head = nn.Sequential(
-            nn.Linear(fused_dim * 2, 512, bias=False),
+            nn.Linear(head_in_dim, 512, bias=False),
             nn.LayerNorm(512),
             nn.ReLU(inplace=True),
             nn.Dropout(dropout),
@@ -215,13 +239,22 @@ class PointNeXtEncoder(nn.Module):
         _, features3 = self.sa3(xyz2, features2)
         features3 = self.stage3(features3)
 
-        multi_scale = torch.cat((features1, F.interpolate(features2, size=features1.shape[-1], mode="nearest")), dim=1)
-        coarse_scale = F.interpolate(features3, size=features1.shape[-1], mode="nearest")
-        fused = torch.cat((multi_scale, coarse_scale), dim=1)
+        if self.feature_fusion == "multi_scale":
+            multi_scale = torch.cat(
+                (features1, F.interpolate(features2, size=features1.shape[-1], mode="nearest")),
+                dim=1,
+            )
+            coarse_scale = F.interpolate(features3, size=features1.shape[-1], mode="nearest")
+            fused = torch.cat((multi_scale, coarse_scale), dim=1)
+        else:
+            fused = features3
 
-        max_feat = F.adaptive_max_pool1d(fused, 1).squeeze(-1)
-        avg_feat = F.adaptive_avg_pool1d(fused, 1).squeeze(-1)
-        global_feat = torch.cat((max_feat, avg_feat), dim=1)
+        pooled = []
+        if self.global_pool in {"max", "max_avg"}:
+            pooled.append(F.adaptive_max_pool1d(fused, 1).squeeze(-1))
+        if self.global_pool in {"avg", "max_avg"}:
+            pooled.append(F.adaptive_avg_pool1d(fused, 1).squeeze(-1))
+        global_feat = pooled[0] if len(pooled) == 1 else torch.cat(pooled, dim=1)
         return self.head(global_feat)
 
 
@@ -238,4 +271,6 @@ def build_pointnext_encoder(out_channels, cfg=None, in_channels=3):
         sa3_npoint=cfg.get("pointnext_sa3_npoint", 32),
         stage_depth=cfg.get("pointnext_stage_depth", 2),
         expansion=cfg.get("pointnext_expansion", 4),
+        feature_fusion=cfg.get("pointnext_feature_fusion", "multi_scale"),
+        global_pool=cfg.get("pointnext_global_pool", "max_avg"),
     )

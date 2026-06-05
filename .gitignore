@@ -33,3 +33,8 @@ __pycache__/
 architecture_regression.md
 baseline_comparison/
 paper_related/
+
+command.md
+tmp.csv
+*.csv
+*.png

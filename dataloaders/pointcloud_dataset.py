@@ -17,6 +17,7 @@ class PointCloudDataset(torch.utils.data.Dataset):
         pretrain=None,
         split=None,
         use_partial=False,
+        point_center_mode="partial_mean",
         supervised_3d=True,
         norm_scale=45.54,
         sdf_loss=False,
@@ -42,6 +43,7 @@ class PointCloudDataset(torch.utils.data.Dataset):
         self.pad_size = pad_size
         self.split = split
         self.use_partial = use_partial
+        self.point_center_mode = point_center_mode
         self.supervised_3d = supervised_3d
         self.norm_scale = norm_scale
         self.sdf_loss = sdf_loss
@@ -49,6 +51,8 @@ class PointCloudDataset(torch.utils.data.Dataset):
         self.sdf_trunc = float(sdf_trunc)
         self._sdf_cache = {}
         self.volume_lookup = self._load_volume_lookup()
+        self.sample_aliases = self._load_optional_json("sample_aliases.json")
+        self.reference_centers = self._load_optional_json("reference_centers.json")
 
         if self.supervised_3d and pretrain is not None:
             self.latents_dict = self.get_latents_dict(pretrain)
@@ -57,14 +61,24 @@ class PointCloudDataset(torch.utils.data.Dataset):
 
         self.files = self.get_instance_filenames()
 
+    def _load_optional_json(self, filename):
+        path = os.path.join(self.data_source, filename)
+        if not os.path.exists(path):
+            return {}
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+
+    def _resolve_alias(self, fruit_id):
+        alias_value = self.sample_aliases.get(fruit_id, fruit_id)
+        return os.path.splitext(str(alias_value))[0]
+
     def _load_volume_lookup(self):
         mapping_path = os.path.join(self.data_source, "mapping.json")
         if not os.path.exists(mapping_path):
             return {}
 
-        repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        gt_csv_path = os.path.join(repo_root, "ground_truth.csv")
-        if not os.path.exists(gt_csv_path):
+        gt_csv_path = self._resolve_ground_truth_csv()
+        if not gt_csv_path or not os.path.exists(gt_csv_path):
             return {}
 
         gt_volumes = {}
@@ -91,6 +105,18 @@ class PointCloudDataset(torch.utils.data.Dataset):
             volume_lookup[os.path.splitext(partial_name)[0]] = volume_ml
 
         return volume_lookup
+
+    def _resolve_ground_truth_csv(self):
+        repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        candidates = [
+            os.path.join(self.data_source, "220_strawberries.csv"),
+            os.path.join(self.data_source, "ground_truth.csv"),
+            os.path.join(repo_root, "ground_truth.csv"),
+        ]
+        for path in candidates:
+            if os.path.exists(path):
+                return path
+        return None
 
     def get_latents_dict(self, path):
         latent_dictionary = {}
@@ -180,10 +206,14 @@ class PointCloudDataset(torch.utils.data.Dataset):
                     continue
 
                 if self.supervised_3d:
-                    if key in self.latents_dict:
+                    latent_key = self._resolve_alias(key)
+                    if latent_key in self.latents_dict:
                         files.append(os.path.join(pcd_dir, fname))
                     else:
-                        print(f"[Warning] Found {fname} but no corresponding latent code in {key}.pth")
+                        print(
+                            f"[Warning] Found {fname} but no corresponding latent code in "
+                            f"{latent_key}.pth"
+                        )
                 else:
                     files.append(os.path.join(pcd_dir, fname))
         else:
@@ -284,6 +314,7 @@ class PointCloudDataset(torch.utils.data.Dataset):
     def __getitem__(self, idx):
         file_path = self.files[idx]
         fruit_id = os.path.basename(file_path)[:-4]
+        base_fruit_id = self._resolve_alias(fruit_id)
 
         pcd = o3d.io.read_point_cloud(file_path)
         points = np.asarray(pcd.points)
@@ -297,6 +328,12 @@ class PointCloudDataset(torch.utils.data.Dataset):
             sampled_points = points[random_list, :]
 
         center = np.mean(points, axis=0)
+        if self.point_center_mode == "reference_lookup":
+            center_lookup = self.reference_centers.get(fruit_id)
+            if center_lookup is None:
+                center_lookup = self.reference_centers.get(base_fruit_id)
+            if center_lookup is not None:
+                center = np.asarray(center_lookup, dtype=np.float64)
         points_centered = points - center
         sampled_points = sampled_points - center
         scale = 1.0
@@ -310,6 +347,7 @@ class PointCloudDataset(torch.utils.data.Dataset):
 
         item = {
             "fruit_id": fruit_id,
+            "base_fruit_id": base_fruit_id,
             "target_pcd": torch.Tensor(sampled_points).float(),
             "partial_pcd": torch.Tensor(sampled_points).float(),
             "center": torch.Tensor(center).float(),
@@ -333,7 +371,7 @@ class PointCloudDataset(torch.utils.data.Dataset):
             item["volume_ml"] = torch.tensor(volume_ml, dtype=torch.float32)
 
         if self.supervised_3d:
-            trained_latent = self.latents_dict[fruit_id]
+            trained_latent = self.latents_dict[base_fruit_id]
             item["latent"] = trained_latent.squeeze().float()
 
         if self.sdf_loss:

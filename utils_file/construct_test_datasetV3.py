@@ -18,14 +18,14 @@ def natural_sort_key(name):
 
 def main():
     # 输入目录
-    complete_pc_dir = '/home/tianqi/corepp2/data/45_straw'
+    complete_pc_dir = '/home/tianqi/corepp2/data/220_strawberries'
     partial_dirs_base = [
-        '/home/tianqi/corepp2/data/render_output_perspective',
-        '/home/tianqi/corepp2/data/render_output'
+        '/home/tianqi/corepp2/data/render_output',
+        '/home/tianqi/corepp2/data/render_output_perspective'
     ]
     
     # 输出目录
-    output_base_dir = '/home/tianqi/corepp2/data/20260331_dataset'
+    output_base_dir = '/home/tianqi/corepp2/data/20260604_dataset'
     partial_out_dir = os.path.join(output_base_dir, 'partial')
     complete_out_dir = os.path.join(output_base_dir, 'complete')
     

@@ -153,9 +153,9 @@ def main():
     parser.add_argument('--experiment', '-e', required=True, help='DeepSDF experiment directory.')
     parser.add_argument('--cfg', '-c', required=True, help='Encoder config JSON.')
     parser.add_argument('--checkpoint_decoder', dest='checkpoint', default='500', help='DeepSDF checkpoint id.')
-    parser.add_argument('--input_dir', '-i', default='/home/tianqi/corepp2/data/D405_data', help='Directory with unseen .ply point clouds.')
-    parser.add_argument('--output_dir', '-o', default='/home/tianqi/corepp2/unseen_output', help='Directory to save reconstructed meshes and CSV.')
-    parser.add_argument('--input_unit', choices=['m', 'cm', 'mm'], default='m', help='Unit of unseen input point clouds.')
+    parser.add_argument('--input_dir', '-i', default='/home/tianqi/corepp2/data/test_ply', help='Directory with unseen .ply point clouds.')
+    parser.add_argument('--output_dir', '-o', default='/home/tianqi/corepp2/unseen_output2', help='Directory to save reconstructed meshes and CSV.')
+    parser.add_argument('--input_unit', choices=['m', 'cm', 'mm'], default='cm', help='Unit of unseen input point clouds.')
     deep_sdf.add_common_args(parser)
     args = parser.parse_args()
 
@@ -240,9 +240,9 @@ def main():
                 mesh_path = mesh_prefix.with_suffix('.ply')
                 mesh = o3d.io.read_triangle_mesh(str(mesh_path))
                 mesh.compute_vertex_normals()
-                # Keep the mesh in the same centered physical coordinate frame used by
-                # training/test.py. Translation is unnecessary for volume and scale is 1.
-                o3d.io.write_triangle_mesh(str(mesh_path), mesh, write_ascii=False)
+                # Keep the original PLY emitted by create_mesh so its on-disk shading/color
+                # behavior matches test.py exactly. We only use the Open3D mesh in memory for
+                # volume computation here.
                 mesh_volume_ml = _compute_volume_ml(mesh, unit=volume_unit) * volume_scale_factor
             except Exception as exc:
                 print(f'[Mesh Error] {frame_id}: {exc}')

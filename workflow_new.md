@@ -41,7 +41,7 @@ python data_preparation/augment_strawberry.py \
 > 2. **Free Space 远场采样**：在表面外侧 0.01~0.1 距离处额外采样 20000 个正 SDF 点，为网络在远离表面的区域提供约束，防止产生伪零等值面。
 
 ```bash
-python data_preparation/prepare_strawberry_sdf.py --src /home/tianqi/corepp2/data/20260331_dataset
+python data_preparation/prepare_strawberry_sdf.py --src /home/tianqi/corepp2/data/20260604_dataset
 ```
 
 **4. 划分训练/验证/测试集 (Make Splits)**
@@ -64,7 +64,7 @@ python data_preparation/make_strawberry_splits.py --data_dir /home/tianqi/corepp
 
 **2. 启动训练**
 ```bash
-python train_deep_sdf.py --experiment ./deepsdf/experiments/20260331_dataset
+python train_deep_sdf.py --experiment ./deepsdf/experiments/20260604_dataset
 ```
 根据表现选取一个最优的 Checkpoint（例如第 1000 个 Epoch，即 `1000.pth`）。
 

@@ -1,8 +1,8 @@
 {
-    "Description": "20260331_dataset_aug DeepSDF Pretrain latent=8",
-    "DataSource": "/home/tianqi/corepp2/data/20260331_dataset",
-    "TrainSplit": "/home/tianqi/corepp2/deepsdf/experiments/splits/20260331_dataset_train.json",
-    "TestSplit": "/home/tianqi/corepp2/deepsdf/experiments/splits/20260331_dataset_test.json",
+    "Description": "20260604_dataset DeepSDF Pretrain latent=32",
+    "DataSource": "/home/tianqi/corepp2/data/20260604_dataset",
+    "TrainSplit": "/home/tianqi/corepp2/deepsdf/experiments/splits/20260604_dataset_train.json",
+    "TestSplit": "/home/tianqi/corepp2/deepsdf/experiments/splits/20260604_dataset_test.json",
     "NetworkArch": "deep_sdf_decoder",
     "NetworkSpecs": {
         "dims": [
@@ -44,7 +44,7 @@
         "latent_dropout": false,
         "weight_norm": true
     },
-    "CodeLength": 8,
+    "CodeLength": 32,
     "NumEpochs": 100,
     "SnapshotFrequency": 100,
     "AdditionalSnapshots": [

@@ -44,9 +44,11 @@ def create_mesh(
     samples.requires_grad = False
 
     head = 0
+    decoder_device = next(decoder.parameters()).device
+    latent_vec = latent_vec.to(decoder_device)
 
     while head < num_samples:
-        sample_subset = samples[head : min(head + max_batch, num_samples), 0:3].cuda()
+        sample_subset = samples[head : min(head + max_batch, num_samples), 0:3].to(decoder_device)
 
         samples[head : min(head + max_batch, num_samples), 3] = (
             deepsdf.deep_sdf.utils.decode_sdf(decoder, latent_vec, sample_subset)

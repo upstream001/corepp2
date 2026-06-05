@@ -213,6 +213,27 @@ def _load_complete_volume_lookup(data_source, gt_csv_path):
     return volume_lookup
 
 
+def _resolve_ground_truth_csv(data_source, configured_path=None):
+    candidates = []
+    if configured_path:
+        candidates.append(configured_path)
+    if data_source:
+        candidates.extend(
+            [
+                os.path.join(data_source, "220_strawberries.csv"),
+                os.path.join(data_source, "ground_truth.csv"),
+            ]
+        )
+
+    repo_root = os.path.dirname(os.path.abspath(__file__))
+    candidates.append(os.path.join(repo_root, "ground_truth.csv"))
+
+    for path in candidates:
+        if path and os.path.exists(path):
+            return path
+    return candidates[0]
+
+
 def _write_aligned_csv(dataframe, output_path):
     if dataframe.empty:
         dataframe.to_csv(output_path, index=False)
@@ -275,6 +296,28 @@ def _volume_regression_metrics(gt_values, pred_values):
         "volume_rmse_ml": round(float(rmse), 6),
         "volume_mape_percent": round(float(mape), 3) if np.isfinite(mape) else np.nan,
         "volume_r2": round(float(r2), 6) if np.isfinite(r2) else np.nan,
+    }
+
+
+def _volume_sample_metrics(gt_value, pred_value):
+    if gt_value is None or pred_value is None:
+        return {col: np.nan for col in VOLUME_SUMMARY_COLUMNS}
+
+    gt = float(gt_value)
+    pred = float(pred_value)
+    if not (np.isfinite(gt) and np.isfinite(pred)):
+        return {col: np.nan for col in VOLUME_SUMMARY_COLUMNS}
+
+    err = pred - gt
+    abs_err = abs(err)
+    mape = np.nan if abs(gt) <= 1e-12 else (abs_err / abs(gt)) * 100.0
+
+    return {
+        "volume_mae_ml": round(float(abs_err), 6),
+        "volume_rmse_ml": round(float(abs_err), 6),
+        "volume_mape_percent": round(float(mape), 3) if np.isfinite(mape) else np.nan,
+        # R^2 is only statistically meaningful across multiple samples.
+        "volume_r2": np.nan,
     }
 
 
@@ -355,8 +398,8 @@ def main_function(decoder, pretrain, cfg, latent_size, test_data_dir=None):
     volume_scale_factor = float(param.get("volume_scale_factor", 1.0))
     remap_mesh_to_gt_bbox = bool(param.get("remap_mesh_to_gt_bbox", False))
     repo_root = os.path.dirname(os.path.abspath(__file__))
-    gt_csv_path = param.get("ground_truth_csv", os.path.join(repo_root, "ground_truth.csv"))
     mapping_data_source = test_data_dir if test_data_dir is not None else param.get("data_dir")
+    gt_csv_path = _resolve_ground_truth_csv(mapping_data_source, param.get("ground_truth_csv"))
     complete_volume_lookup = _load_complete_volume_lookup(mapping_data_source, gt_csv_path)
     pr_max_t = max(0.01, max(metric_thresholds))
     pr_num = max(10, int(round((pr_max_t - 0.001) / 0.001)) + 1)
