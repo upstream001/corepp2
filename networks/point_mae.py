@@ -5,6 +5,21 @@ import torch.nn.functional as F
 from networks.pointnext import farthest_point_sample, index_points, knn_point
 
 
+class PointTokenAttentionPooling(nn.Module):
+    def __init__(self, dim):
+        super().__init__()
+        hidden_dim = max(dim // 2, 64)
+        self.score = nn.Sequential(
+            nn.Linear(dim, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, 1),
+        )
+
+    def forward(self, tokens):
+        weights = torch.softmax(self.score(tokens), dim=1)
+        return torch.sum(tokens * weights, dim=1)
+
+
 class PointMAEPatchEmbedding(nn.Module):
     def __init__(self, in_channels=3, embed_dim=384, hidden_dim=128):
         super().__init__()
@@ -93,9 +108,12 @@ class PointMAEEncoder(nn.Module):
                 for _ in range(depth)
             ]
         )
+        self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
+        self.cls_pos = nn.Parameter(torch.zeros(1, 1, embed_dim))
         self.norm = nn.LayerNorm(embed_dim)
+        self.attn_pool = PointTokenAttentionPooling(embed_dim)
         self.head = nn.Sequential(
-            nn.Linear(embed_dim * 2, 512),
+            nn.Linear(embed_dim * 4, 512),
             nn.LayerNorm(512),
             nn.GELU(),
             nn.Dropout(dropout),
@@ -121,14 +139,20 @@ class PointMAEEncoder(nn.Module):
         centers, grouped_xyz = self._group_points(xyz)
         tokens = self.patch_embed(grouped_xyz)
         tokens = tokens + self.pos_embed(centers)
+        cls_token = self.cls_token.expand(tokens.shape[0], -1, -1)
+        cls_token = cls_token + self.cls_pos
+        tokens = torch.cat((cls_token, tokens), dim=1)
 
         for block in self.blocks:
             tokens = block(tokens)
         tokens = self.norm(tokens)
 
-        max_pool = tokens.max(dim=1)[0]
-        avg_pool = tokens.mean(dim=1)
-        global_feat = torch.cat((max_pool, avg_pool), dim=1)
+        cls_feat = tokens[:, 0]
+        patch_tokens = tokens[:, 1:]
+        attn_pool = self.attn_pool(patch_tokens)
+        max_pool = patch_tokens.max(dim=1)[0]
+        avg_pool = patch_tokens.mean(dim=1)
+        global_feat = torch.cat((cls_feat, attn_pool, max_pool, avg_pool), dim=1)
         return self.head(global_feat)
 
 

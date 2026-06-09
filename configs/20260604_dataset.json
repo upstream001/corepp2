@@ -14,7 +14,7 @@
     "_comment_log_dir": "供 TensorBoard 读取的训练日志和曲线保存路径",
     "log_dir": "./logs/20260604_dataset/runs/",
     "_comment_encoder": "纯点云任务使用的编码器。可选 pointnext、pointnext_unet、pointnet、pointnet2、point_mae 等。",
-    "encoder": "pointnext_unet",
+    "encoder": "point_mae",
     "_comment_pointnet": "当 encoder=pointnet 时可调：pointnet_hidden_dim, pointnet_dropout；当 encoder=pointnet2 时可调：pointnet2_sa1_npoint, pointnet2_sa1_nsample, pointnet2_sa2_npoint, pointnet2_sa2_nsample, pointnet2_dropout",
     "_comment_pointnext": "PointNeXt 结构超参",
     "pointnext_width": 64,
