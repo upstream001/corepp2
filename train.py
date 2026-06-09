@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Sampler
 import numpy as np
 import random
 import json
@@ -24,10 +24,23 @@ from dataloaders.transforms import Pad, Rotate, RandomHorizontalFlip, RandomVert
 
 from networks.models import Encoder, EncoderBig, ERFNetEncoder, EncoderBigPooled, EncoderPooled, DoubleEncoder, PointCloudEncoder, PointCloudEncoderLarge, FoldNetEncoder
 import networks.utils as net_utils
-from networks.pointnext import PointNeXtEncoder, build_pointnext_encoder
+from networks.pointnext import PointNeXtEncoder, PointNeXtUNetEncoder, build_pointnext_encoder, build_pointnext_unet_encoder
 from networks.pointnet import PointNetEncoder, build_pointnet_encoder
 from networks.pointnet2 import PointNet2Encoder, build_pointnet2_encoder
-from loss import KLDivLoss, SuperLoss, SDFLoss, SDFLoss_new, RegLatentLoss, AttRepLoss, LatentSpreadLoss, VolumeLoss
+from networks.point_mae import PointMAEEncoder, build_point_mae_encoder
+from loss import (
+    KLDivLoss,
+    SuperLoss,
+    SDFLoss,
+    SDFLoss_new,
+    RegLatentLoss,
+    AttRepLoss,
+    LatentSpreadLoss,
+    InstanceContrastiveLoss,
+    LatentNormLoss,
+    LatentMeanLoss,
+    VolumeLoss,
+)
 from utils import sdf2mesh_cuda, save_model, tensor_dict_2_float_dict
 
 DEBUG = True
@@ -40,6 +53,8 @@ POINT_CLOUD_ENCODERS = {
     'pointnet',
     'pointnet2',
     'pointnet++',
+    'point_mae',
+    'pointnext_unet',
 }
 
 torch.autograd.set_detect_anomaly(True)
@@ -53,6 +68,52 @@ def check_direxcist(dir):
     if dir is not None:
         if not os.path.exists(dir):
             os.makedirs(dir)  # make new folder
+
+
+class GroupedInstanceBatchSampler(Sampler):
+    def __init__(self, dataset, batch_size, instances_per_batch):
+        if batch_size % instances_per_batch != 0:
+            raise ValueError(
+                f"batch_size={batch_size} must be divisible by instances_per_batch={instances_per_batch}"
+            )
+
+        self.dataset = dataset
+        self.batch_size = batch_size
+        self.instances_per_batch = instances_per_batch
+        self.samples_per_instance = batch_size // instances_per_batch
+
+        self.grouped_indices = {}
+        for idx, file_path in enumerate(dataset.files):
+            fruit_id = os.path.basename(file_path)[:-4]
+            group_id = dataset.partial_to_complete.get(fruit_id, fruit_id)
+            self.grouped_indices.setdefault(group_id, []).append(idx)
+
+    def __iter__(self):
+        per_group_chunks = []
+        for indices in self.grouped_indices.values():
+            shuffled = indices[:]
+            random.shuffle(shuffled)
+            for start in range(0, len(shuffled), self.samples_per_instance):
+                chunk = shuffled[start:start + self.samples_per_instance]
+                if len(chunk) < self.samples_per_instance:
+                    chunk = chunk + random.choices(indices, k=self.samples_per_instance - len(chunk))
+                per_group_chunks.append(chunk)
+
+        random.shuffle(per_group_chunks)
+        for start in range(0, len(per_group_chunks), self.instances_per_batch):
+            selected = per_group_chunks[start:start + self.instances_per_batch]
+            if len(selected) < self.instances_per_batch:
+                break
+            batch = []
+            for chunk in selected:
+                batch.extend(chunk)
+            yield batch
+
+    def __len__(self):
+        total_chunks = 0
+        for indices in self.grouped_indices.values():
+            total_chunks += int(np.ceil(len(indices) / self.samples_per_instance))
+        return total_chunks // self.instances_per_batch
 
 
 def decode_sdf_in_chunks(decoder, latent_batch, grid_batch, latent_size, chunk_size):
@@ -215,6 +276,12 @@ def main_function(decoder, train_pretrain, val_pretrain, cfg, latent_size, trunc
     point_center_mode = str(param.get("point_center_mode", "partial_mean"))
     lambda_super = float(param.get("lambda_super", 0.3))
     lambda_latent_spread = float(param.get("lambda_latent_spread", 1.0))
+    lambda_instance_contrastive = float(param.get("lambda_instance_contrastive", 0.0))
+    instance_contrastive_margin = float(param.get("instance_contrastive_margin", 1.0))
+    lambda_decoder_consistency = float(param.get("lambda_decoder_consistency", 0.0))
+    decoder_consistency_points = int(param.get("decoder_consistency_points", 256))
+    lambda_latent_norm = float(param.get("lambda_latent_norm", 0.0))
+    lambda_latent_mean = float(param.get("lambda_latent_mean", 0.0))
     lambda_volume = float(param.get("lambda_volume", 0.5))
     volume_loss_relative_weight = float(param.get("volume_loss_relative_weight", 0.5))
     train_volume_head = lambda_volume > 0
@@ -223,7 +290,6 @@ def main_function(decoder, train_pretrain, val_pretrain, cfg, latent_size, trunc
     volume_unit = str(param.get("volume_unit", "cm")).lower()
     volume_scale_factor = float(param.get("volume_scale_factor", 1.0))
     validation_mesh_dir = os.path.join(param["checkpoint_dir"], "..", "val_output")
-    shuffle = True
     last_val_score = np.inf
 
     # creating variables for 3d grid for diff SDF renderer
@@ -249,10 +315,14 @@ def main_function(decoder, train_pretrain, val_pretrain, cfg, latent_size, trunc
         encoder = FoldNetEncoder(in_channels=3, out_channels=latent_size).to(device)
     elif param['encoder'] == 'pointnext':
         encoder = build_pointnext_encoder(out_channels=latent_size, cfg=param).to(device)
+    elif param['encoder'] == 'pointnext_unet':
+        encoder = build_pointnext_unet_encoder(out_channels=latent_size, cfg=param).to(device)
     elif param['encoder'] == 'pointnet':
         encoder = build_pointnet_encoder(out_channels=latent_size, cfg=param).to(device)
     elif param['encoder'] in ['pointnet2', 'pointnet++']:
         encoder = build_pointnet2_encoder(out_channels=latent_size, cfg=param).to(device)
+    elif param['encoder'] == 'point_mae':
+        encoder = build_point_mae_encoder(out_channels=latent_size, cfg=param).to(device)
     else:
         encoder = Encoder(in_channels=4, out_channels=latent_size, size=param["input_size"]).to(device)
 
@@ -307,7 +377,17 @@ def main_function(decoder, train_pretrain, val_pretrain, cfg, latent_size, trunc
                                             overfit=overfit,
                                             species=param["species"]
                                             )
-    dataset = DataLoader(cl_dataset, batch_size=param["batch_size"], shuffle=shuffle, drop_last=True)
+    use_grouped_batches = bool(param.get("group_by_instance_batch", False))
+    instances_per_batch = int(param.get("instances_per_batch", 1))
+    if use_grouped_batches and param['encoder'] in POINT_CLOUD_ENCODERS:
+        grouped_batches = GroupedInstanceBatchSampler(
+            cl_dataset,
+            batch_size=int(param["batch_size"]),
+            instances_per_batch=instances_per_batch,
+        )
+        dataset = DataLoader(cl_dataset, batch_sampler=grouped_batches)
+    else:
+        dataset = DataLoader(cl_dataset, batch_size=param["batch_size"], shuffle=True, drop_last=True)
 
     if update_decoder:
         params = list(encoder.parameters()) + list(decoder.parameters())
@@ -384,7 +464,8 @@ def main_function(decoder, train_pretrain, val_pretrain, cfg, latent_size, trunc
                 writer.add_scalar('Debug/Train/BatchCovDet', determinant, n_iter)
 
             if param['supervised_3d']:
-                loss_super = SuperLoss(latent_batch, item['latent'])
+                target_latent = item['latent'].to(device)
+                loss_super = SuperLoss(latent_batch, target_latent)
                 loss += lambda_super * loss_super
 
                 # logging
@@ -392,10 +473,88 @@ def main_function(decoder, train_pretrain, val_pretrain, cfg, latent_size, trunc
                 logging_string += ' -- loss super: {}'.format((lambda_super * loss_super).item())
 
                 if lambda_latent_spread > 0 and latent_batch.shape[0] > 1:
-                    loss_spread = LatentSpreadLoss(latent_batch, item['latent'].to(device))
+                    loss_spread = LatentSpreadLoss(latent_batch, target_latent)
                     loss += lambda_latent_spread * loss_spread
                     writer.add_scalar('Loss/Train/LatentSpreadLoss', lambda_latent_spread * loss_spread, n_iter)
                     logging_string += ' -- loss spread: {}'.format((lambda_latent_spread * loss_spread).item())
+
+                if lambda_instance_contrastive > 0 and latent_batch.shape[0] > 1:
+                    group_ids = item.get('group_fruit_id', item.get('base_fruit_id', item['fruit_id']))
+                    label_to_idx = {}
+                    labels = []
+                    for group_id in group_ids:
+                        group_id = str(group_id)
+                        if group_id not in label_to_idx:
+                            label_to_idx[group_id] = len(label_to_idx)
+                        labels.append(label_to_idx[group_id])
+                    labels = torch.tensor(labels, device=device, dtype=torch.long)
+                    loss_instance = InstanceContrastiveLoss(
+                        latent_batch,
+                        labels,
+                        margin=instance_contrastive_margin,
+                    )
+                    loss += lambda_instance_contrastive * loss_instance
+                    writer.add_scalar(
+                        'Loss/Train/InstanceContrastiveLoss',
+                        lambda_instance_contrastive * loss_instance,
+                        n_iter,
+                    )
+                    logging_string += ' -- loss inst_contrast: {}'.format(
+                        (lambda_instance_contrastive * loss_instance).item()
+                    )
+
+                if lambda_latent_norm > 0:
+                    loss_norm = LatentNormLoss(latent_batch, target_latent)
+                    loss += lambda_latent_norm * loss_norm
+                    writer.add_scalar('Loss/Train/LatentNormLoss', lambda_latent_norm * loss_norm, n_iter)
+                    logging_string += ' -- loss norm: {}'.format((lambda_latent_norm * loss_norm).item())
+
+                if lambda_latent_mean > 0 and latent_batch.shape[0] > 1:
+                    loss_mean = LatentMeanLoss(latent_batch, target_latent)
+                    loss += lambda_latent_mean * loss_mean
+                    writer.add_scalar('Loss/Train/LatentMeanLoss', lambda_latent_mean * loss_mean, n_iter)
+                    logging_string += ' -- loss mean: {}'.format((lambda_latent_mean * loss_mean).item())
+
+                if lambda_decoder_consistency > 0:
+                    surface_points = item['partial_pcd'].to(device)
+                    num_points = surface_points.shape[1]
+                    if decoder_consistency_points < num_points:
+                        sampled_idx = torch.randperm(num_points, device=device)[:decoder_consistency_points]
+                        surface_points = surface_points[:, sampled_idx, :]
+
+                    pred_decoder_input = torch.cat(
+                        [
+                            latent_batch.unsqueeze(1).expand(-1, surface_points.shape[1], -1),
+                            surface_points,
+                        ],
+                        dim=2,
+                    ).reshape(-1, latent_size + 3)
+
+                    target_decoder_input = torch.cat(
+                        [
+                            target_latent.unsqueeze(1).expand(-1, surface_points.shape[1], -1),
+                            surface_points,
+                        ],
+                        dim=2,
+                    ).reshape(-1, latent_size + 3)
+
+                    pred_sdf_consistency = decoder(pred_decoder_input)
+                    with torch.no_grad():
+                        target_sdf_consistency = decoder(target_decoder_input)
+
+                    loss_decoder_consistency = torch.nn.functional.mse_loss(
+                        pred_sdf_consistency,
+                        target_sdf_consistency,
+                    )
+                    loss += lambda_decoder_consistency * loss_decoder_consistency
+                    writer.add_scalar(
+                        'Loss/Train/DecoderConsistencyLoss',
+                        lambda_decoder_consistency * loss_decoder_consistency,
+                        n_iter,
+                    )
+                    logging_string += ' -- loss dec_cons: {}'.format(
+                        (lambda_decoder_consistency * loss_decoder_consistency).item()
+                    )
 
             if train_volume_head and 'volume_ml' in item:
                 loss_volume = VolumeLoss(pred_volume, item['volume_ml'].to(device).view(-1, 1), relative_weight=volume_loss_relative_weight)
@@ -515,47 +674,51 @@ def main_function(decoder, train_pretrain, val_pretrain, cfg, latent_size, trunc
                 gt_mesh_volumes = []
                 pred_mesh_volumes = []
                 print('\nvalidation...')
-                if val_supervised:
-                    for sample_idx, item in enumerate(tqdm(iter(val_dataset))):
-                        try:
-                            if param['encoder'] not in POINT_CLOUD_ENCODERS:
-                                encoder_input = torch.cat((item['rgb'], item['depth']), 1).to(device)
-                            else:
-                                encoder_input = item['partial_pcd'].permute(0, 2, 1).to(device)
+                for sample_idx, item in enumerate(tqdm(iter(val_dataset))):
+                    try:
+                        if param['encoder'] not in POINT_CLOUD_ENCODERS:
+                            encoder_input = torch.cat((item['rgb'], item['depth']), 1).to(device)
+                        else:
+                            encoder_input = item['partial_pcd'].permute(0, 2, 1).to(device)
 
-                            latent_val = encoder(encoder_input)
+                        latent_val = encoder(encoder_input)
 
+                        if val_supervised:
                             target_latent = item['latent'].to(device)
                             mse = torch.nn.functional.mse_loss(latent_val.squeeze(), target_latent.squeeze())
                             val_losses.append(mse.item())
 
-                            if train_volume_head and 'volume_ml' in item:
-                                pred_volume_val = volume_head(latent_val)
-                                vol_loss = VolumeLoss(pred_volume_val, item['volume_ml'].to(device).view(-1, 1), relative_weight=volume_loss_relative_weight)
-                                val_volume_losses.append(vol_loss.item())
+                        if train_volume_head and 'volume_ml' in item:
+                            pred_volume_val = volume_head(latent_val)
+                            vol_loss = VolumeLoss(
+                                pred_volume_val,
+                                item['volume_ml'].to(device).view(-1, 1),
+                                relative_weight=volume_loss_relative_weight,
+                            )
+                            val_volume_losses.append(vol_loss.item())
 
-                            if validate_mesh_volume and 'volume_ml' in item:
-                                os.makedirs(validation_mesh_dir, exist_ok=True)
-                                mesh_filename = os.path.join(validation_mesh_dir, item['fruit_id'][0])
-                                pred_mesh_volume = _compute_decoder_mesh_volume_ml(
-                                    decoder,
-                                    latent_val,
-                                    mesh_filename,
-                                    grid_density,
-                                    volume_unit,
-                                    volume_scale_factor,
-                                )
-                                if np.isfinite(pred_mesh_volume):
-                                    pred_mesh_volumes.append(pred_mesh_volume)
-                                    gt_mesh_volumes.append(float(item['volume_ml'].item()))
+                        if validate_mesh_volume and 'volume_ml' in item:
+                            os.makedirs(validation_mesh_dir, exist_ok=True)
+                            mesh_filename = os.path.join(validation_mesh_dir, item['fruit_id'][0])
+                            pred_mesh_volume = _compute_decoder_mesh_volume_ml(
+                                decoder,
+                                latent_val,
+                                mesh_filename,
+                                grid_density,
+                                volume_unit,
+                                volume_scale_factor,
+                            )
+                            if np.isfinite(pred_mesh_volume):
+                                pred_mesh_volumes.append(pred_mesh_volume)
+                                gt_mesh_volumes.append(float(item['volume_ml'].item()))
 
-                            if args.overfit:
-                                break
-                        except Exception as exc:
-                            sample_name = item.get('fruit_id', ['unknown'])
-                            if isinstance(sample_name, (list, tuple)):
-                                sample_name = sample_name[0]
-                            print(f"[Warning] Validation sample {sample_idx} ({sample_name}) failed: {exc}")
+                        if args.overfit:
+                            break
+                    except Exception as exc:
+                        sample_name = item.get('fruit_id', ['unknown'])
+                        if isinstance(sample_name, (list, tuple)):
+                            sample_name = sample_name[0]
+                        print(f"[Warning] Validation sample {sample_idx} ({sample_name}) failed: {exc}")
 
                 if len(val_losses) > 0:
                     rmse_volume = sum(val_losses) / len(val_losses)

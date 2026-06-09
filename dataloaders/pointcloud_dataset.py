@@ -395,6 +395,7 @@ class PointCloudDataset(torch.utils.data.Dataset):
         item = {
             "fruit_id": fruit_id,
             "base_fruit_id": base_fruit_id,
+            "group_fruit_id": self.partial_to_complete.get(fruit_id, base_fruit_id),
             "target_pcd": torch.Tensor(sampled_points).float(),
             "partial_pcd": torch.Tensor(sampled_points).float(),
             "center": torch.Tensor(center).float(),

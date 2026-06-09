@@ -96,9 +96,10 @@ class CustomTestDataset(torch.utils.data.Dataset):
         return item
 
 from networks.models import Encoder, EncoderBig, ERFNetEncoder, EncoderBigPooled, EncoderPooled, DoubleEncoder, PointCloudEncoder, PointCloudEncoderLarge, FoldNetEncoder
-from networks.pointnext import PointNeXtEncoder, build_pointnext_encoder
+from networks.pointnext import PointNeXtEncoder, PointNeXtUNetEncoder, build_pointnext_encoder, build_pointnext_unet_encoder
 from networks.pointnet import PointNetEncoder, build_pointnet_encoder
 from networks.pointnet2 import PointNet2Encoder, build_pointnet2_encoder
+from networks.point_mae import PointMAEEncoder, build_point_mae_encoder
 import networks.utils as net_utils
 
 import open3d as o3d
@@ -128,6 +129,8 @@ POINT_CLOUD_ENCODERS = {
     'pointnet',
     'pointnet2',
     'pointnet++',
+    'point_mae',
+    'pointnext_unet',
 }
 
 
@@ -449,10 +452,14 @@ def main_function(decoder, pretrain, cfg, latent_size, test_data_dir=None):
         encoder = FoldNetEncoder(in_channels=3, out_channels=latent_size).to(device)
     elif param['encoder'] == 'pointnext':
         encoder = build_pointnext_encoder(out_channels=latent_size, cfg=param).to(device)
+    elif param['encoder'] == 'pointnext_unet':
+        encoder = build_pointnext_unet_encoder(out_channels=latent_size, cfg=param).to(device)
     elif param['encoder'] == 'pointnet':
         encoder = build_pointnet_encoder(out_channels=latent_size, cfg=param).to(device)
     elif param['encoder'] in ['pointnet2', 'pointnet++']:
         encoder = build_pointnet2_encoder(out_channels=latent_size, cfg=param).to(device)
+    elif param['encoder'] == 'point_mae':
+        encoder = build_point_mae_encoder(out_channels=latent_size, cfg=param).to(device)
     else:
         encoder = Encoder(in_channels=4, out_channels=latent_size, size=param["input_size"]).to(device)
 

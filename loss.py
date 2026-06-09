@@ -118,6 +118,37 @@ def LatentSpreadLoss(pred, gt, eps=1e-6):
     return nn.MSELoss()(pred_std, gt_std)
 
 
+def InstanceContrastiveLoss(latents, labels, margin=1.0):
+    if latents.shape[0] < 2:
+        return latents.new_tensor(0.0)
+
+    labels = labels.view(-1)
+    pair_losses = []
+    for i in range(latents.shape[0]):
+        for j in range(i + 1, latents.shape[0]):
+            dist = torch.linalg.norm(latents[i] - latents[j], ord=2)
+            if labels[i] == labels[j]:
+                pair_losses.append(dist.pow(2))
+            else:
+                pair_losses.append(torch.clamp(margin - dist, min=0.0).pow(2))
+
+    if not pair_losses:
+        return latents.new_tensor(0.0)
+    return torch.stack(pair_losses).mean()
+
+
+def LatentNormLoss(pred, gt):
+    pred_norm = torch.linalg.norm(pred, dim=1)
+    gt_norm = torch.linalg.norm(gt.detach(), dim=1)
+    return nn.MSELoss()(pred_norm, gt_norm)
+
+
+def LatentMeanLoss(pred, gt):
+    pred_mean = torch.mean(pred, dim=0)
+    gt_mean = torch.mean(gt.detach(), dim=0)
+    return nn.MSELoss()(pred_mean, gt_mean)
+
+
 def VolumeLoss(pred_volume, target_volume, log_target=True, relative_weight=0.5, eps=1e-6):
     target = target_volume.float().view_as(pred_volume)
     if log_target:

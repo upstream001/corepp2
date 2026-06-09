@@ -45,12 +45,11 @@
         "weight_norm": true
     },
     "CodeLength": 32,
-    "NumEpochs": 100,
-    "SnapshotFrequency": 100,
+    "NumEpochs": 20,
+    "SnapshotFrequency": 20,
     "AdditionalSnapshots": [
         0,
-        500,
-        1000
+        20
     ],
     "LearningRateSchedule": [
         {

@@ -1,0 +1,1 @@
+_20260604_dataset_best_model.pt 是训练point-mae得到的，效果比较好，损失函数只使用了super-loss
