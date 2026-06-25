@@ -29,6 +29,7 @@ from networks.models import (
     PointCloudEncoder,
     PointCloudEncoderLarge,
 )
+from networks.point_mae import build_point_mae_encoder
 from networks.pointnext import build_pointnext_encoder
 
 
@@ -73,14 +74,16 @@ class UnseenPointCloudDataset(torch.utils.data.Dataset):
         if num_points == 0:
             sampled_points = np.zeros((self.pad_size, 3), dtype=np.float32)
             center = np.zeros(3, dtype=np.float32)
-            scale = 1.0
         else:
             replace = num_points < self.pad_size
             choice = np.random.choice(num_points, size=self.pad_size, replace=replace)
             sampled_points = points[choice, :].astype(np.float32)
             center = points.mean(axis=0).astype(np.float32)
+            # Match dataloaders/pointcloud_dataset.py:
+            # point-cloud encoders are trained on centered coordinates only,
+            # without per-instance unit-sphere normalization.
             sampled_points = sampled_points - center
-            scale = 1.0
+        scale = 1.0
 
         item = {
             'fruit_id': frame_id,
@@ -143,6 +146,8 @@ def _build_encoder(param, latent_size, device):
         return PointCloudEncoderLarge(in_channels=3, out_channels=latent_size).to(device)
     if name == 'foldnet':
         return FoldNetEncoder(in_channels=3, out_channels=latent_size).to(device)
+    if name == 'point_mae':
+        return build_point_mae_encoder(out_channels=latent_size, cfg=param).to(device)
     if name == 'pointnext':
         return build_pointnext_encoder(out_channels=latent_size, cfg=param).to(device)
     return Encoder(in_channels=4, out_channels=latent_size, size=param['input_size']).to(device)
@@ -227,6 +232,7 @@ def main():
             mesh_prefix = mesh_dir / frame_id
             mesh_volume_ml = 0.0
             mesh_path = None
+            aligned_mesh_path = None
             start = time.time()
             try:
                 deepsdf.deep_sdf.mesh.create_mesh(
@@ -240,10 +246,23 @@ def main():
                 mesh_path = mesh_prefix.with_suffix('.ply')
                 mesh = o3d.io.read_triangle_mesh(str(mesh_path))
                 mesh.compute_vertex_normals()
-                # Keep the original PLY emitted by create_mesh so its on-disk shading/color
-                # behavior matches test.py exactly. We only use the Open3D mesh in memory for
-                # volume computation here.
-                mesh_volume_ml = _compute_volume_ml(mesh, unit=volume_unit) * volume_scale_factor
+                center_cm = item['center'][0].cpu().numpy()
+                scale_cm = item['scale'][0].item()
+                aligned_mesh = o3d.geometry.TriangleMesh(mesh)
+                aligned_mesh = _restore_mesh_to_physical_scale(
+                    aligned_mesh,
+                    center_cm=center_cm,
+                    scale_cm=scale_cm,
+                )
+                aligned_mesh.compute_vertex_normals()
+                aligned_mesh_path = mesh_prefix.with_name(f"{frame_id}_aligned").with_suffix('.ply')
+                o3d.io.write_triangle_mesh(
+                    str(aligned_mesh_path),
+                    aligned_mesh,
+                    write_ascii=False,
+                    write_vertex_normals=True,
+                )
+                mesh_volume_ml = _compute_volume_ml(aligned_mesh, unit=volume_unit) * volume_scale_factor
             except Exception as exc:
                 print(f'[Mesh Error] {frame_id}: {exc}')
 
@@ -254,6 +273,7 @@ def main():
                 'mesh_volume_ml': round(mesh_volume_ml, 6),
                 'latent_path': str(latent_path),
                 'mesh_path': str(mesh_path) if mesh_path is not None and mesh_path.exists() else '',
+                'aligned_mesh_path': str(aligned_mesh_path) if aligned_mesh_path is not None and aligned_mesh_path.exists() else '',
                 'inference_time_ms': round((time.time() - start) * 1000.0, 3),
             })
 

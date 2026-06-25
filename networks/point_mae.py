@@ -82,10 +82,27 @@ class PointMAEEncoder(nn.Module):
         num_heads=8,
         mlp_ratio=4.0,
         dropout=0.1,
+        use_cls_token=True,
+        use_attention_pooling=True,
+        pooling_modes=None,
     ):
         super().__init__()
         self.num_groups = num_groups
         self.group_size = group_size
+        self.use_cls_token = bool(use_cls_token)
+        if pooling_modes is None:
+            pooling_modes = []
+            if use_attention_pooling:
+                pooling_modes.append("attn")
+            pooling_modes.extend(["max", "avg"])
+        self.pooling_modes = [str(mode).lower() for mode in pooling_modes]
+        if not self.pooling_modes:
+            raise ValueError("PointMAEEncoder requires at least one pooling mode.")
+        valid_pooling_modes = {"attn", "max", "avg"}
+        invalid_modes = sorted(set(self.pooling_modes) - valid_pooling_modes)
+        if invalid_modes:
+            raise ValueError(f"Unsupported pooling modes: {invalid_modes}")
+        self.use_attention_pooling = "attn" in self.pooling_modes
 
         self.patch_embed = PointMAEPatchEmbedding(
             in_channels=in_channels,
@@ -108,12 +125,17 @@ class PointMAEEncoder(nn.Module):
                 for _ in range(depth)
             ]
         )
-        self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
-        self.cls_pos = nn.Parameter(torch.zeros(1, 1, embed_dim))
+        if self.use_cls_token:
+            self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
+            self.cls_pos = nn.Parameter(torch.zeros(1, 1, embed_dim))
+        else:
+            self.cls_token = None
+            self.cls_pos = None
         self.norm = nn.LayerNorm(embed_dim)
-        self.attn_pool = PointTokenAttentionPooling(embed_dim)
+        self.attn_pool = PointTokenAttentionPooling(embed_dim) if self.use_attention_pooling else None
+        num_global_chunks = len(self.pooling_modes) + int(self.use_cls_token)
         self.head = nn.Sequential(
-            nn.Linear(embed_dim * 4, 512),
+            nn.Linear(embed_dim * num_global_chunks, 512),
             nn.LayerNorm(512),
             nn.GELU(),
             nn.Dropout(dropout),
@@ -139,25 +161,43 @@ class PointMAEEncoder(nn.Module):
         centers, grouped_xyz = self._group_points(xyz)
         tokens = self.patch_embed(grouped_xyz)
         tokens = tokens + self.pos_embed(centers)
-        cls_token = self.cls_token.expand(tokens.shape[0], -1, -1)
-        cls_token = cls_token + self.cls_pos
-        tokens = torch.cat((cls_token, tokens), dim=1)
+        if self.use_cls_token:
+            cls_token = self.cls_token.expand(tokens.shape[0], -1, -1)
+            cls_token = cls_token + self.cls_pos
+            tokens = torch.cat((cls_token, tokens), dim=1)
 
         for block in self.blocks:
             tokens = block(tokens)
         tokens = self.norm(tokens)
 
-        cls_feat = tokens[:, 0]
-        patch_tokens = tokens[:, 1:]
-        attn_pool = self.attn_pool(patch_tokens)
-        max_pool = patch_tokens.max(dim=1)[0]
-        avg_pool = patch_tokens.mean(dim=1)
-        global_feat = torch.cat((cls_feat, attn_pool, max_pool, avg_pool), dim=1)
+        if self.use_cls_token:
+            cls_feat = tokens[:, 0]
+            patch_tokens = tokens[:, 1:]
+        else:
+            cls_feat = None
+            patch_tokens = tokens
+
+        global_chunks = []
+        if cls_feat is not None:
+            global_chunks.append(cls_feat)
+        for mode in self.pooling_modes:
+            if mode == "attn":
+                global_chunks.append(self.attn_pool(patch_tokens))
+            elif mode == "max":
+                global_chunks.append(patch_tokens.max(dim=1)[0])
+            elif mode == "avg":
+                global_chunks.append(patch_tokens.mean(dim=1))
+        global_feat = torch.cat(global_chunks, dim=1)
         return self.head(global_feat)
 
 
 def build_point_mae_encoder(out_channels, cfg=None, in_channels=3):
     cfg = cfg or {}
+    pooling_modes = cfg.get("point_mae_pooling_modes")
+    if pooling_modes is None:
+        pooling_modes = None
+    elif isinstance(pooling_modes, str):
+        pooling_modes = [token.strip() for token in pooling_modes.split("+") if token.strip()]
     return PointMAEEncoder(
         in_channels=in_channels,
         out_channels=out_channels,
@@ -168,4 +208,7 @@ def build_point_mae_encoder(out_channels, cfg=None, in_channels=3):
         num_heads=cfg.get("point_mae_num_heads", 8),
         mlp_ratio=cfg.get("point_mae_mlp_ratio", 4.0),
         dropout=cfg.get("point_mae_dropout", 0.1),
+        use_cls_token=cfg.get("point_mae_use_cls_token", True),
+        use_attention_pooling=cfg.get("point_mae_use_attention_pooling", True),
+        pooling_modes=pooling_modes,
     )

@@ -39,6 +39,7 @@ from loss import (
     InstanceContrastiveLoss,
     LatentNormLoss,
     LatentMeanLoss,
+    LatentCosineLoss,
     VolumeLoss,
 )
 from utils import sdf2mesh_cuda, save_model, tensor_dict_2_float_dict
@@ -258,6 +259,10 @@ def resolve_supervision_path(experiment_directory, checkpoint, split, allow_matr
     return None
 
 
+def _checkpoint_path(checkpoint_dir, filename):
+    return os.path.join(checkpoint_dir, filename)
+
+
 def main_function(decoder, train_pretrain, val_pretrain, cfg, latent_size, trunc_val, overfit, update_decoder):
 
     if DEBUG:
@@ -280,6 +285,7 @@ def main_function(decoder, train_pretrain, val_pretrain, cfg, latent_size, trunc
     instance_contrastive_margin = float(param.get("instance_contrastive_margin", 1.0))
     lambda_decoder_consistency = float(param.get("lambda_decoder_consistency", 0.0))
     decoder_consistency_points = int(param.get("decoder_consistency_points", 256))
+    lambda_latent_cosine = float(param.get("lambda_latent_cosine", 0.0))
     lambda_latent_norm = float(param.get("lambda_latent_norm", 0.0))
     lambda_latent_mean = float(param.get("lambda_latent_mean", 0.0))
     lambda_volume = float(param.get("lambda_volume", 0.5))
@@ -410,6 +416,7 @@ def main_function(decoder, train_pretrain, val_pretrain, cfg, latent_size, trunc
     last_loss = torch.tensor(float("nan"), device=device)
     for e in range(param["epoch"]):
         last_epoch = e
+        epoch_train_losses = []
         for idx, item in enumerate(iter(dataset)):
 
             # import ipdb;ipdb.set_trace()
@@ -471,6 +478,12 @@ def main_function(decoder, train_pretrain, val_pretrain, cfg, latent_size, trunc
                 # logging
                 writer.add_scalar('Loss/Train/SuperLoss', lambda_super * loss_super, n_iter)
                 logging_string += ' -- loss super: {}'.format((lambda_super * loss_super).item())
+
+                if lambda_latent_cosine > 0:
+                    loss_cosine = LatentCosineLoss(latent_batch, target_latent)
+                    loss += lambda_latent_cosine * loss_cosine
+                    writer.add_scalar('Loss/Train/LatentCosineLoss', lambda_latent_cosine * loss_cosine, n_iter)
+                    logging_string += ' -- loss cosine: {}'.format((lambda_latent_cosine * loss_cosine).item())
 
                 if lambda_latent_spread > 0 and latent_batch.shape[0] > 1:
                     loss_spread = LatentSpreadLoss(latent_batch, target_latent)
@@ -611,6 +624,7 @@ def main_function(decoder, train_pretrain, val_pretrain, cfg, latent_size, trunc
             loss.backward()
             optim.step()
             last_loss = loss.detach()
+            epoch_train_losses.append(loss.item())
 
             # tensorboard logging
             writer.add_scalar('LRate', scheduler.get_last_lr()[0], n_iter)
@@ -620,6 +634,26 @@ def main_function(decoder, train_pretrain, val_pretrain, cfg, latent_size, trunc
             print(logging_string)
 
         scheduler.step()
+        epoch_train_loss = float(np.mean(epoch_train_losses)) if len(epoch_train_losses) > 0 else float("nan")
+        if np.isfinite(epoch_train_loss):
+            writer.add_scalar('Loss/Train/EpochMean', epoch_train_loss, e + 1)
+
+        if selection_metric == "train_loss":
+            if np.isfinite(epoch_train_loss) and epoch_train_loss < last_val_score:
+                last_val_score = epoch_train_loss
+                save_model(
+                    encoder,
+                    decoder,
+                    e,
+                    optim,
+                    last_loss,
+                    _checkpoint_path(
+                        param["checkpoint_dir"],
+                        param.get("checkpoint_file", f"_{cfg_fname}_best_model.pt"),
+                    ),
+                    volume_head=volume_head if train_volume_head else None,
+                )
+                print(f"saving best model (train loss: {epoch_train_loss:.6f})")
 
         # validation step
         if (e+1) % param["validation_frequency"] == 0:
@@ -754,7 +788,9 @@ def main_function(decoder, train_pretrain, val_pretrain, cfg, latent_size, trunc
                 else:
                     print('Validation Mesh Volume RMSE: NaN')
 
-                if selection_metric == "mesh_volume_rmse":
+                if selection_metric == "train_loss":
+                    val_score = epoch_train_loss
+                elif selection_metric == "mesh_volume_rmse":
                     val_score = rmse_mesh_volume if np.isfinite(rmse_mesh_volume) else rmse_volume
                 elif selection_metric == "volume_loss":
                     val_score = val_volume_loss if np.isfinite(val_volume_loss) else rmse_volume
@@ -779,7 +815,7 @@ def main_function(decoder, train_pretrain, val_pretrain, cfg, latent_size, trunc
             if np.isfinite(val_score):
                 writer.add_scalar('Val/score', val_score, n_iter)
             # saving best model
-            if np.isfinite(val_score) and val_score < last_val_score:
+            if selection_metric != "train_loss" and np.isfinite(val_score) and val_score < last_val_score:
                 last_val_score = val_score
                 save_model(
                     encoder,
@@ -787,7 +823,10 @@ def main_function(decoder, train_pretrain, val_pretrain, cfg, latent_size, trunc
                     e,
                     optim,
                     loss,
-                    param["checkpoint_dir"]+'_'+cfg_fname+'_best_model.pt',
+                    _checkpoint_path(
+                        param["checkpoint_dir"],
+                        param.get("checkpoint_file", f"_{cfg_fname}_best_model.pt"),
+                    ),
                     volume_head=volume_head if train_volume_head else None,
                 )
                 print('saving best model')
@@ -806,7 +845,10 @@ def main_function(decoder, train_pretrain, val_pretrain, cfg, latent_size, trunc
                 e,
                 optim,
                 loss,
-                param["checkpoint_dir"]+'_'+cfg_fname+'_checkpoint.pt',
+                _checkpoint_path(
+                    param["checkpoint_dir"],
+                    param.get("checkpoint_snapshot_file", f"_{cfg_fname}_checkpoint.pt"),
+                ),
                 volume_head=volume_head if train_volume_head else None,
             )
 
@@ -823,7 +865,10 @@ def main_function(decoder, train_pretrain, val_pretrain, cfg, latent_size, trunc
         last_epoch,
         optim,
         last_loss,
-        param["checkpoint_dir"]+'_'+cfg_fname+'_final_model.pt',
+        _checkpoint_path(
+            param["checkpoint_dir"],
+            param.get("final_checkpoint_file", f"_{cfg_fname}_final_model.pt"),
+        ),
         volume_head=volume_head if train_volume_head else None,
     )
 

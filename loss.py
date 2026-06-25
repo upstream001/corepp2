@@ -149,6 +149,14 @@ def LatentMeanLoss(pred, gt):
     return nn.MSELoss()(pred_mean, gt_mean)
 
 
+def LatentCosineLoss(pred, gt, eps=1e-8):
+    pred_norm = pred / torch.clamp(torch.linalg.norm(pred, dim=1, keepdim=True), min=eps)
+    gt_detached = gt.detach()
+    gt_norm = gt_detached / torch.clamp(torch.linalg.norm(gt_detached, dim=1, keepdim=True), min=eps)
+    cosine_sim = torch.sum(pred_norm * gt_norm, dim=1)
+    return (1.0 - cosine_sim).mean()
+
+
 def VolumeLoss(pred_volume, target_volume, log_target=True, relative_weight=0.5, eps=1e-6):
     target = target_volume.float().view_as(pred_volume)
     if log_target:

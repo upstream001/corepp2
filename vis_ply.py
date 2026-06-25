@@ -106,7 +106,7 @@ if __name__ == "__main__":
     if args.files:
         input_files.extend(args.files)
     if args.file1:
-        input_files.append(args.file1)
+        input_files.append(args.file1) 
     if args.file2:
         input_files.append(args.file2)
         
@@ -114,9 +114,7 @@ if __name__ == "__main__":
     if not input_files:
         print("未指定文件，使用默认示例文件...")
         input_files = [
-            "/home/tianqi/corepp2/data/55_straw_rotated_220/1.ply",
-            "/home/tianqi/corepp2/data/55_straw_rotated_220/56.ply",
-            "/home/tianqi/corepp2/data/55_straw_rotated_220/101.ply"
+            "/home/tianqi/corepp2/data/20260331_dataset/partial/00000.ply"
         ]
     
     visualize(input_files, args.offset)

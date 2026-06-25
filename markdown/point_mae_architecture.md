@@ -11,7 +11,8 @@
 - 将点云划分为局部 patch
 - 将每个 patch 编码成 token
 - 用 Transformer 在 patch token 之间建模全局关系
-- 通过全局池化输出固定长度 latent code
+- 引入 attention pooling 强化全局汇聚
+- 输出固定长度 latent code
 
 ## Overall Pipeline
 
@@ -26,7 +27,7 @@
 2. 对每个 patch 做 patch embedding
 3. 用 patch center 做 position embedding
 4. 将 token 序列送入多层 Transformer block
-5. 对 token 做 `max + avg` 全局池化
+5. 对 patch token 做 `attention + max + avg` 汇聚
 6. 用 MLP head 输出最终 latent
 
 ## Patch Grouping
@@ -127,23 +128,38 @@ token_i = patch_embed(patch_i) + pos_embed(center_i)
 - 模型可以从剩余可见局部推断整体形状关系
 - 对 partial 点云任务，这比纯局部层级聚合更容易保留全局差异
 
-## Global Pooling And Latent Head
+## Global Aggregation And Latent Head
 
 对应实现：
 
-- [`PointMAEEncoder.forward()`](/home/tianqi/corepp2/networks/point_mae.py:108)
-- [`self.head`](/home/tianqi/corepp2/networks/point_mae.py:88)
+- [`PointTokenAttentionPooling`](/home/tianqi/corepp2/networks/point_mae.py:8)
+- [`PointMAEEncoder.forward()`](/home/tianqi/corepp2/networks/point_mae.py:122)
+- [`self.head`](/home/tianqi/corepp2/networks/point_mae.py:103)
 
-token 经过 Transformer 后，先做：
+token 经过 Transformer 后，先分成：
 
-- `max_pool = tokens.max(dim=1)`
-- `avg_pool = tokens.mean(dim=1)`
-- 拼接成 `global_feat ∈ R^(B, 768)`
+- `patch_tokens = tokens`
+
+然后对 `patch_tokens` 做三种汇聚：
+
+- `attention pooling`
+- `max pooling`
+- `avg pooling`
+
+最后拼接成：
+
+```text
+global_feat = [attn_pool, max_pool, avg_pool]
+```
+
+所以当前全局特征维度是：
+
+- `3 * embed_dim = 1152`
 
 然后送入 MLP head：
 
 ```text
-768 -> 512 -> 256 -> 32
+1152 -> 512 -> 256 -> 32
 ```
 
 中间层结构：
@@ -156,6 +172,13 @@ token 经过 Transformer 后，先做：
 最终输出：
 
 - `latent code ∈ R^(B, 32)`
+
+这版和早期实现的关键区别是：
+
+- 不再只用 `max + avg pooling`
+- 额外加入了 `attention pooling`
+- 全局表示更强调 token 之间的内容差异，而不是只依赖统计量
+- 消融实验表明 `CLS token` 在当前任务中无益，因此最终版本不采用它
 
 ## Effective Hyperparameters
 
@@ -178,12 +201,54 @@ token 经过 Transformer 后，先做：
 }
 ```
 
-训练设置里，与该 encoder 搭配效果较好的要点是：
+当前较优训练设置里，与该 encoder 搭配效果较好的要点是：
 
-- 只启用 `SuperLoss`
+- 启用 `SuperLoss`
+- 启用小权重 `LatentCosineLoss`
 - 不启用 `volume`、`latent spread`、`instance contrastive`、`decoder consistency`
 - 输入为 partial point cloud
 - 输出监督为 DeepSDF latent code
+
+对应关键配置：
+
+```json
+{
+  "lambda_super": 1.0,
+  "lambda_latent_cosine": 0.02,
+  "lambda_volume": 0.0,
+  "lambda_latent_spread": 0.0,
+  "lambda_instance_contrastive": 0.0,
+  "lambda_decoder_consistency": 0.0,
+  "lambda_latent_norm": 0.0,
+  "lambda_latent_mean": 0.0
+}
+```
+
+## Current Best Result
+
+当前更优的一版结果来自：
+
+- [`检查点暂存/加入新的损失函数/shape_completion_results_multi_threshold.csv`](/home/tianqi/corepp2/检查点暂存/加入新的损失函数/shape_completion_results_multi_threshold.csv)
+
+相对早期纯 `SuperLoss` 基线，这一版在加入小权重 `LatentCosineLoss` 后指标进一步提升：
+
+- `volume_mae_ml = 1.791514`
+- `volume_rmse_ml = 2.133881`
+- `chamfer_distance = 0.061642`
+- `f1_t0p05 = 46.15188`
+- `corr(complete_volume_ml, mesh_volume_ml) = 0.918525`
+
+当前可以把这版理解为：
+
+```text
+Total Loss = 1.0 * SuperLoss + 0.02 * LatentCosineLoss
+```
+
+这里 `LatentCosineLoss` 的作用不是重新塑形 latent 分布，而是轻量约束：
+
+- `pred latent` 和 `gt latent` 的方向一致
+- 在保留 `SuperLoss` 数值监督的同时，提高样本间区分度
+- 避免像之前一些强分布约束那样把 latent 拉塌
 
 ## Why It Worked Better Here
 
@@ -192,7 +257,8 @@ token 经过 Transformer 后，先做：
 - 它先把点云离散成 patch token，再做全局关系建模
 - 对 partial 点云的块状缺失更友好
 - 更不容易在全局池化前就把实例差异压掉
-- 在只用 `SuperLoss` 的情况下，也能保留较好的样本区分度
+- `attention pooling + max pooling + avg pooling` 让全局汇聚更有表达力
+- 在 `SuperLoss + 小权重 cosine` 的设置下，能进一步保留较好的样本区分度
 
 一句话概括：
 

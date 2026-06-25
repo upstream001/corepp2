@@ -508,7 +508,7 @@ def main_function(decoder, pretrain, cfg, latent_size, test_data_dir=None):
                 pad_size=param["input_size"],
                 pretrain=pretrain,
                 split='test',
-                use_partial=False,
+                use_partial=True,
                 supervised_3d=False
             )
         else:
@@ -536,7 +536,7 @@ def main_function(decoder, pretrain, cfg, latent_size, test_data_dir=None):
             pad_size=param["input_size"],
             pretrain=pretrain,
             split='val',
-            use_partial=False,
+            use_partial=True,
             supervised_3d=False,
             sdf_loss=False,
             grid_density=param["grid_density"],

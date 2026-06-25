@@ -115,7 +115,7 @@ class PointCloudVisualizer:
 
 def main():
     parser = argparse.ArgumentParser(description="批量可视化目录中的点云文件")
-    parser.add_argument("dir", default="/home/tianqi/PoinTr/data/straw_test3/partial", type=str, help="点云文件夹路径")
+    parser.add_argument("dir", default="/home/tianqi/corepp2/unseen_output2/meshes", type=str, help="点云文件夹路径")
     parser.add_argument("--ext", default="ply", type=str, help="文件扩展名 (如 ply, pcd, npz)")
     
     args = parser.parse_args()
